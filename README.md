@@ -121,8 +121,9 @@ The image is published to GHCR and there's a ready-made Unraid template at
    **Seerr API Key**, and optionally **Discord Guild ID** — set the **Data Directory**
    (defaults to `/mnt/user/appdata/vaultrequestrr`), then **Apply**.
 
-The bot needs no inbound ports or WebUI; it only makes outbound connections to
-Discord and Seerr.
+The bot makes outbound connections to Discord and Seerr. The only inbound port
+is the optional admin dashboard (`5056`), which is served only when you set a
+**Dashboard Password** in the template.
 
 ## Configuration reference
 
