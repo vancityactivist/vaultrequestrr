@@ -72,6 +72,34 @@ async def test_search_fully_encodes_reserved_characters():
     assert "query=Mission%3A%20Impossible" in captured["url"]
 
 
+@pytest.mark.asyncio
+async def test_search_fetches_multiple_pages():
+    pages = {
+        1: {"page": 1, "totalPages": 2, "results": [
+            {"id": 1, "mediaType": "movie", "title": "A"},
+            {"id": 2, "mediaType": "tv", "name": "skip me"},
+        ]},
+        2: {"page": 2, "totalPages": 2, "results": [
+            {"id": 3, "mediaType": "movie", "title": "B"},
+        ]},
+    }
+    seen_pages = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        page = int(request.url.params["page"])
+        seen_pages.append(page)
+        return httpx.Response(200, json=pages[page])
+
+    client = make_client(handler)
+    try:
+        results = await client.search("x", "movie")
+    finally:
+        await client.aclose()
+
+    assert seen_pages == [1, 2]  # walked both pages
+    assert [r.tmdb_id for r in results] == [1, 3]  # tv filtered out, movies combined
+
+
 # -- create_request body ---------------------------------------------------
 
 

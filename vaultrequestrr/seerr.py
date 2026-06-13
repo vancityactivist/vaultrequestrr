@@ -23,6 +23,11 @@ STATUS_PROCESSING = 3
 STATUS_PARTIALLY_AVAILABLE = 4
 STATUS_AVAILABLE = 5
 
+# Seerr request status codes (request.status).
+REQUEST_PENDING = 1
+REQUEST_APPROVED = 2
+REQUEST_DECLINED = 3
+
 MediaType = str  # "movie" or "tv"
 
 
@@ -106,6 +111,15 @@ class UserQuota:
     tv: QuotaStatus
 
 
+@dataclass(frozen=True)
+class RequestInfo:
+    id: int
+    request_status: int | None  # REQUEST_* code
+    media_status: int | None  # STATUS_* code
+    media_type: str | None
+    tmdb_id: int | None
+
+
 class SeerrClient:
     def __init__(
         self,
@@ -164,19 +178,31 @@ class SeerrClient:
 
     # -- search & details --------------------------------------------------
 
-    async def search(self, query: str, media_type: MediaType) -> list[SearchResult]:
+    async def search(
+        self,
+        query: str,
+        media_type: MediaType,
+        *,
+        max_pages: int = 3,
+        limit: int = 50,
+    ) -> list[SearchResult]:
         # Seerr requires the query value to be fully percent-encoded, including
         # reserved characters like ":" (e.g. "Mission: Impossible"). httpx's
         # default param encoding leaves those untouched, so we encode it
         # ourselves with safe="" and build the query string directly.
         encoded = quote(query, safe="")
-        data = await self._get(f"search?query={encoded}&page=1&language=en")
-        results = []
-        for raw in data.get("results", []):
-            if raw.get("mediaType") != media_type:
-                continue
-            results.append(_to_search_result(raw))
-        return results
+        results: list[SearchResult] = []
+        page = 1
+        total_pages = 1
+        while page <= total_pages and page <= max_pages and len(results) < limit:
+            data = await self._get(f"search?query={encoded}&page={page}&language=en")
+            total_pages = data.get("totalPages") or 1
+            for raw in data.get("results", []):
+                if raw.get("mediaType") != media_type:
+                    continue
+                results.append(_to_search_result(raw))
+            page += 1
+        return results[:limit]
 
     async def get_tv_details(self, tmdb_id: int) -> TvDetails:
         data = await self._get(f"tv/{tmdb_id}")
@@ -341,6 +367,17 @@ class SeerrClient:
             body["seasons"] = list(seasons) if isinstance(seasons, Iterable) and not isinstance(seasons, str) else (seasons or "all")
 
         return await self._post("request", body)
+
+    async def get_request(self, request_id: int) -> RequestInfo:
+        data = await self._get(f"request/{request_id}")
+        media = data.get("media") or {}
+        return RequestInfo(
+            id=data.get("id", request_id),
+            request_status=data.get("status"),
+            media_status=media.get("status"),
+            media_type=media.get("mediaType"),
+            tmdb_id=media.get("tmdbId"),
+        )
 
 
 # -- module-level parsing helpers -----------------------------------------

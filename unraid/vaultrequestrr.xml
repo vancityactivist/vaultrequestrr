@@ -11,7 +11,7 @@
   <Project>https://github.com/vancityactivist/vaultrequestrr</Project>
   <Overview>A Discord bot that requests movies and TV shows through Seerr (the Overseerr/Jellyseerr successor). The first time a user requests something, the bot asks for their Plex username/email and links their Discord account to their Seerr user, so every request is attributed to them and their per-user quotas/limits are respected. The link is stored locally (SQLite) and written back into Seerr notification settings. No inbound ports or WebUI &#8212; the bot only makes outbound connections.</Overview>
   <Category>MediaApp:Other Tools:Other</Category>
-  <WebUI/>
+  <WebUI>http://[IP]:[PORT:5056]/</WebUI>
   <TemplateURL>https://raw.githubusercontent.com/vancityactivist/vaultrequestrr/main/unraid/vaultrequestrr.xml</TemplateURL>
   <Icon>https://raw.githubusercontent.com/vancityactivist/vaultrequestrr/main/unraid/icon.png</Icon>
   <ExtraParams/>
@@ -29,4 +29,9 @@
   <Config Name="Require Linking" Target="REQUIRE_LINKING" Default="true" Mode="" Description="Require users to link a Plex account before their first request (recommended: true)." Type="Variable" Display="advanced" Required="false" Mask="false">true</Config>
   <Config Name="Default Seerr User ID" Target="DEFAULT_SEERR_USER_ID" Default="" Mode="" Description="Optional fallback Seerr user id used only when Require Linking is false." Type="Variable" Display="advanced" Required="false" Mask="false"/>
   <Config Name="Log Level" Target="LOG_LEVEL" Default="INFO" Mode="" Description="DEBUG, INFO, WARNING, or ERROR." Type="Variable" Display="advanced" Required="false" Mask="false">INFO</Config>
+  <Config Name="Dashboard Password" Target="WEB_PASSWORD" Default="" Mode="" Description="Set a password to enable the admin web dashboard (view/manage links, activity, settings). Leave blank to disable the dashboard." Type="Variable" Display="always" Required="false" Mask="true"/>
+  <Config Name="Dashboard Port" Target="5056" Default="5056" Mode="tcp" Description="Host port for the admin dashboard. Only used when a Dashboard Password is set." Type="Port" Display="always" Required="false" Mask="false">5056</Config>
+  <Config Name="Notify When Available" Target="NOTIFY_ON_AVAILABLE" Default="true" Mode="" Description="DM the requester when their movie/season becomes available." Type="Variable" Display="advanced" Required="false" Mask="false">true</Config>
+  <Config Name="Notify When Declined" Target="NOTIFY_ON_DECLINED" Default="true" Mode="" Description="DM the requester when an admin declines their request." Type="Variable" Display="advanced" Required="false" Mask="false">true</Config>
+  <Config Name="Poll Interval (seconds)" Target="POLL_INTERVAL_SECONDS" Default="120" Mode="" Description="How often to poll Seerr for request status changes (0 disables notifications)." Type="Variable" Display="advanced" Required="false" Mask="false">120</Config>
 </Container>

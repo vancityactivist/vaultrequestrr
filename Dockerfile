@@ -18,4 +18,7 @@ COPY vaultrequestrr ./vaultrequestrr
 ENV DATABASE_PATH=/data/vaultrequestrr.sqlite3
 VOLUME ["/data"]
 
+# Admin dashboard (only active when WEB_PASSWORD is set).
+EXPOSE 5056
+
 CMD ["python", "-m", "vaultrequestrr"]

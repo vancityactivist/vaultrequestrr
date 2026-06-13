@@ -29,6 +29,13 @@ class Config:
     default_seerr_user_id: int | None
     database_path: str
     log_level: str
+    # Notifications
+    poll_interval_seconds: int
+    notify_on_available: bool
+    notify_on_declined: bool
+    # Web dashboard
+    web_port: int
+    web_password: str
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -59,6 +66,11 @@ class Config:
             default_seerr_user_id=_optional_int(os.getenv("DEFAULT_SEERR_USER_ID")),
             database_path=os.getenv("DATABASE_PATH", "data/vaultrequestrr.sqlite3").strip(),
             log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper(),
+            poll_interval_seconds=_optional_int(os.getenv("POLL_INTERVAL_SECONDS")) or 120,
+            notify_on_available=_bool(os.getenv("NOTIFY_ON_AVAILABLE"), default=True),
+            notify_on_declined=_bool(os.getenv("NOTIFY_ON_DECLINED"), default=True),
+            web_port=_optional_int(os.getenv("WEB_PORT")) or 5056,
+            web_password=os.getenv("WEB_PASSWORD", "").strip(),
         )
 
 

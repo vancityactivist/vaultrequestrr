@@ -6,5 +6,7 @@ services:
     env_file: .env
     environment:
       DATABASE_PATH: /data/vaultrequestrr.sqlite3
+    ports:
+      - "5056:5056"  # admin dashboard (only served when WEB_PASSWORD is set)
     volumes:
       - ./data:/data

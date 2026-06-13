@@ -30,12 +30,29 @@ visible in the Seerr UI.
 4. The link is saved (SQLite) and written back to Seerr.
 5. The request is submitted with that user's `userId`, so Seerr applies their quota/permissions.
 
+Search results and the season picker show availability at a glance (✅ available,
+🟡 partial, ⏳ processing, 🕒 requested), and the Request button greys out when
+the selected media/seasons are already present. Results beyond 25 paginate.
+
+### Notifications
+
+The bot polls Seerr on a timer and **DMs the requester** when their request
+becomes available or is declined (configurable, `POLL_INTERVAL_SECONDS`). Only
+requests made through the bot are tracked.
+
+### Admin dashboard
+
+If `WEB_PASSWORD` is set, a small web dashboard is served on `WEB_PORT` (default
+`5056`): health (Discord/Seerr status), linked accounts (with unlink/remap),
+recent request activity, and live-toggleable settings. Sign in with the password.
+
 Commands:
 
 | Command | Description |
 | --- | --- |
 | `/movie <title>` | Search for and request a movie |
 | `/tv <title>` | Search for and request a TV show (with season selection) |
+| `/quota` | Show your remaining request quota and when it resets |
 | `/linkstatus` | Show which Seerr account you're linked to |
 | `/unlink` | Remove your link (you'll be asked again on the next request) |
 
@@ -119,6 +136,11 @@ Discord and Seerr.
 | `DEFAULT_SEERR_USER_ID` | no | — | Fallback user id when linking is disabled |
 | `DATABASE_PATH` | no | `data/vaultrequestrr.sqlite3` | SQLite path for links |
 | `LOG_LEVEL` | no | `INFO` | `DEBUG`/`INFO`/`WARNING`/`ERROR` |
+| `POLL_INTERVAL_SECONDS` | no | `120` | How often to poll Seerr for status changes (0 disables) |
+| `NOTIFY_ON_AVAILABLE` | no | `true` | DM requester when media becomes available |
+| `NOTIFY_ON_DECLINED` | no | `true` | DM requester when a request is declined |
+| `WEB_PASSWORD` | no | — | Set to enable the admin dashboard |
+| `WEB_PORT` | no | `5056` | Port the dashboard listens on |
 
 ## Development
 

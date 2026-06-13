@@ -1,5 +1,37 @@
-from vaultrequestrr.cogs.requests import ConfirmView, SeasonSelectView
+from vaultrequestrr.cogs.requests import (
+    MAX_SELECT_OPTIONS,
+    ConfirmView,
+    ResultSelect,
+    ResultSelectView,
+    SeasonSelectView,
+    _PageButton,
+)
 from vaultrequestrr.seerr import STATUS_AVAILABLE, SearchResult, SeasonInfo, TvDetails
+
+
+def _results(n):
+    return [SearchResult("movie", i, f"M{i}", "2020", "x", None, None) for i in range(n)]
+
+
+def test_result_view_single_page_has_no_page_buttons():
+    v = ResultSelectView(None, "movie", _results(10))
+    assert not [c for c in v.children if isinstance(c, _PageButton)]
+
+
+def test_result_view_paginates():
+    v = ResultSelectView(None, "movie", _results(57))
+    assert v._max_page == 2  # 25 + 25 + 7
+    sel = next(c for c in v.children if isinstance(c, ResultSelect))
+    assert len(sel.options) == MAX_SELECT_OPTIONS
+    prev, nxt = [c for c in v.children if isinstance(c, _PageButton)]
+    assert prev.disabled and not nxt.disabled  # first page
+
+    v._page = v._max_page
+    v._render()
+    sel = next(c for c in v.children if isinstance(c, ResultSelect))
+    assert len(sel.options) == 7  # remainder on the last page
+    prev, nxt = [c for c in v.children if isinstance(c, _PageButton)]
+    assert nxt.disabled and not prev.disabled
 
 
 def _movie(status=None):

@@ -113,9 +113,10 @@ class RequestCog(commands.Cog):
             )
             return
 
-        view = ResultSelectView(self, media_type, results[:MAX_SELECT_OPTIONS])
+        view = ResultSelectView(self, media_type, results)
+        suffix = f" — {view.page_label()}" if len(results) > MAX_SELECT_OPTIONS else ""
         await interaction.followup.send(
-            f"Found {len(results[:MAX_SELECT_OPTIONS])} result(s) for **{title}** — pick one:",
+            f"Found {len(results)} result(s) for **{title}**, pick one{suffix}:",
             view=view,
             ephemeral=True,
         )
@@ -132,7 +133,7 @@ class RequestCog(commands.Cog):
         """Entry from a Request button: apply the link gate, then submit."""
         discord_id = str(interaction.user.id)
 
-        if self.bot.config.require_linking:
+        if self.bot.runtime.require_linking:
             link = await self.bot.linker.get_link(discord_id)
             if link is None:
                 # First request: prompt for Plex identity. The modal continues the flow.
@@ -157,7 +158,7 @@ class RequestCog(commands.Cog):
     ) -> None:
         """Submit the request to Seerr. Assumes the interaction is deferred."""
         try:
-            await self.bot.seerr.create_request(
+            created = await self.bot.seerr.create_request(
                 media_type,
                 result.tmdb_id,
                 user_id=user_id,
@@ -168,6 +169,18 @@ class RequestCog(commands.Cog):
                 f"⚠️ Couldn't submit the request: {exc}", ephemeral=True
             )
             return
+
+        # Track it so the poller can DM this user when it lands or is declined.
+        request_id = (created or {}).get("id")
+        if request_id is not None:
+            await self.bot.store.add_tracked_request(
+                request_id=int(request_id),
+                discord_id=str(interaction.user.id),
+                media_type=media_type,
+                tmdb_id=result.tmdb_id,
+                title=result.title,
+                seasons=_seasons_to_str(seasons),
+            )
 
         embed = _success_embed(result, seasons)
         if user_id is not None:
@@ -189,7 +202,41 @@ class RequestCog(commands.Cog):
 class ResultSelectView(discord.ui.View):
     def __init__(self, cog: RequestCog, media_type: str, results: list[SearchResult]) -> None:
         super().__init__(timeout=INTERACTION_TIMEOUT)
-        self.add_item(ResultSelect(cog, media_type, results))
+        self._cog = cog
+        self._media_type = media_type
+        self._results = results
+        self._page = 0
+        self._render()
+
+    @property
+    def _max_page(self) -> int:
+        return max((len(self._results) - 1) // MAX_SELECT_OPTIONS, 0)
+
+    def _render(self) -> None:
+        self.clear_items()
+        start = self._page * MAX_SELECT_OPTIONS
+        page_results = self._results[start : start + MAX_SELECT_OPTIONS]
+        self.add_item(ResultSelect(self._cog, self._media_type, page_results))
+        if len(self._results) > MAX_SELECT_OPTIONS:
+            self.add_item(_PageButton(-1, "◀ Prev", disabled=self._page == 0))
+            self.add_item(_PageButton(+1, "Next ▶", disabled=self._page >= self._max_page))
+
+    def page_label(self) -> str:
+        return f"Page {self._page + 1}/{self._max_page + 1}"
+
+
+class _PageButton(discord.ui.Button):
+    def __init__(self, delta: int, label: str, *, disabled: bool) -> None:
+        super().__init__(label=label, style=discord.ButtonStyle.secondary, disabled=disabled, row=1)
+        self._delta = delta
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        view: ResultSelectView = self.view  # type: ignore[assignment]
+        view._page = max(0, min(view._page + self._delta, view._max_page))
+        view._render()
+        await interaction.response.edit_message(
+            content=f"Pick a title — {view.page_label()}:", view=view
+        )
 
 
 class ResultSelect(discord.ui.Select):
@@ -454,6 +501,14 @@ def _quota_embed(quota: UserQuota) -> discord.Embed:
     embed.add_field(name="🎬 Movies", value=_quota_line(quota.movie), inline=False)
     embed.add_field(name="📺 TV", value=_quota_line(quota.tv), inline=False)
     return embed
+
+
+def _seasons_to_str(seasons: list[int] | str | None) -> str | None:
+    if seasons is None:
+        return None
+    if isinstance(seasons, str):
+        return seasons
+    return ",".join(str(s) for s in seasons)
 
 
 def _truncate(text: str, length: int) -> str:
