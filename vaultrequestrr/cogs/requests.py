@@ -16,7 +16,18 @@ from discord import app_commands
 from discord.ext import commands
 
 from ..linking import LinkStatus
-from ..seerr import SearchResult, SeerrError, TvDetails
+from ..seerr import (
+    STATUS_AVAILABLE,
+    STATUS_PARTIALLY_AVAILABLE,
+    STATUS_PENDING,
+    STATUS_PROCESSING,
+    QuotaStatus,
+    SearchResult,
+    SeasonInfo,
+    SeerrError,
+    TvDetails,
+    UserQuota,
+)
 
 if TYPE_CHECKING:
     from ..bot import VaultRequestrr
@@ -65,6 +76,23 @@ class RequestCog(commands.Cog):
             "Your account link has been removed. You'll be asked to link again on your next request.",
             ephemeral=True,
         )
+
+    @app_commands.command(name="quota", description="Show your remaining Seerr request quota")
+    async def quota(self, interaction: discord.Interaction) -> None:
+        link = await self.bot.linker.get_link(str(interaction.user.id))
+        if link is None:
+            await interaction.response.send_message(
+                "You're not linked yet. Make a request and you'll be prompted to link first.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            quota = await self.bot.seerr.get_quota(link.seerr_user_id)
+        except SeerrError as exc:
+            await interaction.followup.send(f"⚠️ {exc}", ephemeral=True)
+            return
+        await interaction.followup.send(embed=_quota_embed(quota), ephemeral=True)
 
     # -- search entry point ------------------------------------------------
 
@@ -141,9 +169,16 @@ class RequestCog(commands.Cog):
             )
             return
 
-        await interaction.followup.send(
-            embed=_success_embed(result, seasons), ephemeral=True
-        )
+        embed = _success_embed(result, seasons)
+        if user_id is not None:
+            try:
+                quota = await self.bot.seerr.get_quota(user_id)
+                line = _quota_line(quota.movie if media_type == "movie" else quota.tv)
+                embed.add_field(name="Your remaining quota", value=line, inline=False)
+            except SeerrError:
+                pass  # never fail a successful request just because quota lookup did
+
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 # ---------------------------------------------------------------------------
@@ -162,14 +197,20 @@ class ResultSelect(discord.ui.Select):
         self._cog = cog
         self._media_type = media_type
         self._results = {str(r.tmdb_id): r for r in results}
-        options = [
-            discord.SelectOption(
-                label=_truncate(f"{r.title}" + (f" ({r.year})" if r.year else ""), 100),
-                value=str(r.tmdb_id),
-                description=_truncate(r.overview or "", 100) or None,
+        options = []
+        for r in results:
+            emoji, status_text = _status_emoji_text(r.status)
+            description = " · ".join(
+                part for part in (status_text, _truncate(r.overview or "", 80)) if part
             )
-            for r in results
-        ]
+            options.append(
+                discord.SelectOption(
+                    label=_truncate(f"{r.title}" + (f" ({r.year})" if r.year else ""), 100),
+                    value=str(r.tmdb_id),
+                    description=_truncate(description, 100) or None,
+                    emoji=emoji,
+                )
+            )
         super().__init__(placeholder="Select a title…", options=options, min_values=1, max_values=1)
 
     async def callback(self, interaction: discord.Interaction) -> None:
@@ -227,10 +268,13 @@ class SeasonSelect(discord.ui.Select):
     def __init__(self, details: TvDetails) -> None:
         options = [discord.SelectOption(label="All seasons", value="all", default=True)]
         for season in details.seasons[: MAX_SELECT_OPTIONS - 1]:
+            emoji, status_text = _season_emoji_text(season)
             options.append(
                 discord.SelectOption(
                     label=_truncate(season.name or f"Season {season.season_number}", 100),
                     value=str(season.season_number),
+                    description=status_text,
+                    emoji=emoji,
                 )
             )
         super().__init__(
@@ -349,6 +393,39 @@ def _success_embed(result: SearchResult, seasons: list[int] | str | None) -> dis
         embed.add_field(name="Seasons", value=", ".join(str(s) for s in seasons))
     elif seasons == "all":
         embed.add_field(name="Seasons", value="All")
+    return embed
+
+
+def _status_emoji_text(status: int | None) -> tuple[str | None, str | None]:
+    if status == STATUS_AVAILABLE:
+        return "✅", "Available"
+    if status == STATUS_PARTIALLY_AVAILABLE:
+        return "🟡", "Partially available"
+    if status == STATUS_PROCESSING:
+        return "⏳", "Processing"
+    if status == STATUS_PENDING:
+        return "🕒", "Requested"
+    return None, None
+
+
+def _season_emoji_text(season: SeasonInfo) -> tuple[str | None, str | None]:
+    if season.available:
+        return "✅", "Available"
+    if season.requested:
+        return "🕒", "Requested"
+    return None, None
+
+
+def _quota_line(quota: QuotaStatus) -> str:
+    if quota.unlimited:
+        return "Unlimited"
+    return f"{quota.remaining} of {quota.limit} left ({quota.used} used in the last {quota.days} days)"
+
+
+def _quota_embed(quota: UserQuota) -> discord.Embed:
+    embed = discord.Embed(title="Your Seerr request quota", color=discord.Color.blurple())
+    embed.add_field(name="🎬 Movies", value=_quota_line(quota.movie), inline=False)
+    embed.add_field(name="📺 TV", value=_quota_line(quota.tv), inline=False)
     return embed
 
 

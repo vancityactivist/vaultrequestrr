@@ -74,6 +74,8 @@ class SeerrUser:
 class SeasonInfo:
     season_number: int
     name: str | None = None
+    available: bool = False
+    requested: bool = False
 
 
 @dataclass(frozen=True)
@@ -81,6 +83,25 @@ class TvDetails:
     tmdb_id: int
     title: str
     seasons: list[SeasonInfo] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class QuotaStatus:
+    limit: int  # 0 means unlimited
+    used: int
+    remaining: int | None  # None when unlimited
+    restricted: bool  # True when the user has hit their limit
+    days: int
+
+    @property
+    def unlimited(self) -> bool:
+        return self.limit == 0
+
+
+@dataclass(frozen=True)
+class UserQuota:
+    movie: QuotaStatus
+    tv: QuotaStatus
 
 
 class SeerrClient:
@@ -157,18 +178,52 @@ class SeerrClient:
 
     async def get_tv_details(self, tmdb_id: int) -> TvDetails:
         data = await self._get(f"tv/{tmdb_id}")
-        seasons = [
-            SeasonInfo(
-                season_number=s.get("seasonNumber"),
-                name=s.get("name"),
+        media_info = data.get("mediaInfo") or {}
+
+        # Per-season availability comes from mediaInfo.seasons[].status; requested
+        # seasons come from pending/approved entries in mediaInfo.requests[].
+        season_status = {
+            s.get("seasonNumber"): s.get("status")
+            for s in (media_info.get("seasons") or [])
+        }
+        requested_numbers: set[int] = set()
+        for req in media_info.get("requests") or []:
+            if req.get("status") in (1, 2):  # PENDING or APPROVED
+                for s in req.get("seasons") or []:
+                    requested_numbers.add(s.get("seasonNumber"))
+
+        seasons = []
+        for s in data.get("seasons", []):
+            number = s.get("seasonNumber", 0)
+            if number <= 0:
+                continue
+            status = season_status.get(number)
+            available = status == STATUS_AVAILABLE
+            requested = number in requested_numbers or status in (
+                STATUS_PENDING,
+                STATUS_PROCESSING,
+                STATUS_PARTIALLY_AVAILABLE,
             )
-            for s in data.get("seasons", [])
-            if s.get("seasonNumber", 0) > 0
-        ]
+            seasons.append(
+                SeasonInfo(
+                    season_number=number,
+                    name=s.get("name"),
+                    available=available,
+                    requested=requested and not available,
+                )
+            )
+
         return TvDetails(
             tmdb_id=tmdb_id,
             title=data.get("name") or data.get("title") or str(tmdb_id),
             seasons=seasons,
+        )
+
+    async def get_quota(self, user_id: int) -> UserQuota:
+        data = await self._get(f"user/{user_id}/quota")
+        return UserQuota(
+            movie=_to_quota(data.get("movie") or {}),
+            tv=_to_quota(data.get("tv") or {}),
         )
 
     # -- users -------------------------------------------------------------
@@ -266,6 +321,21 @@ def _to_search_result(raw: dict[str, Any]) -> SearchResult:
         overview=raw.get("overview") or None,
         poster_url=f"https://image.tmdb.org/t/p/w500{poster}" if poster else None,
         status=media_info.get("status"),
+    )
+
+
+def _to_quota(raw: dict[str, Any]) -> QuotaStatus:
+    limit = raw.get("limit") or 0
+    used = raw.get("used") or 0
+    remaining = raw.get("remaining")
+    if remaining is None and limit:
+        remaining = max(limit - used, 0)
+    return QuotaStatus(
+        limit=limit,
+        used=used,
+        remaining=remaining,
+        restricted=bool(raw.get("restricted")),
+        days=raw.get("days") or 0,
     )
 
 

@@ -158,6 +158,67 @@ async def test_add_discord_id_merges_existing_settings():
     assert posted["discordId"] == "222"  # legacy field set
 
 
+# -- get_tv_details season status ------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tv_details_marks_available_and_requested_seasons():
+    payload = {
+        "name": "Test Show",
+        "seasons": [
+            {"seasonNumber": 0, "name": "Specials"},  # ignored
+            {"seasonNumber": 1, "name": "Season 1"},
+            {"seasonNumber": 2, "name": "Season 2"},
+            {"seasonNumber": 3, "name": "Season 3"},
+        ],
+        "mediaInfo": {
+            "seasons": [{"seasonNumber": 1, "status": 5}],  # S1 available
+            "requests": [{"status": 1, "seasons": [{"seasonNumber": 2}]}],  # S2 requested
+        },
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    client = make_client(handler)
+    try:
+        details = await client.get_tv_details(123)
+    finally:
+        await client.aclose()
+
+    by_num = {s.season_number: s for s in details.seasons}
+    assert set(by_num) == {1, 2, 3}  # special (0) excluded
+    assert by_num[1].available and not by_num[1].requested
+    assert by_num[2].requested and not by_num[2].available
+    assert not by_num[3].available and not by_num[3].requested
+
+
+# -- get_quota -------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_quota_unlimited_and_limited():
+    payload = {
+        "movie": {"days": 7, "limit": 0, "used": 3, "restricted": False},
+        "tv": {"days": 30, "limit": 5, "used": 2, "restricted": False},
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/user/9/quota"
+        return httpx.Response(200, json=payload)
+
+    client = make_client(handler)
+    try:
+        quota = await client.get_quota(9)
+    finally:
+        await client.aclose()
+
+    assert quota.movie.unlimited
+    assert quota.movie.remaining is None
+    assert not quota.tv.unlimited
+    assert quota.tv.remaining == 3  # 5 - 2
+
+
 @pytest.mark.asyncio
 async def test_error_response_raises():
     def handler(request: httpx.Request) -> httpx.Response:
