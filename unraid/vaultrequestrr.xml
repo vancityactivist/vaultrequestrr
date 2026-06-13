@@ -9,7 +9,7 @@
   <Privileged>false</Privileged>
   <Support>https://github.com/vancityactivist/vaultrequestrr/issues</Support>
   <Project>https://github.com/vancityactivist/vaultrequestrr</Project>
-  <Overview>A Discord bot that requests movies and TV shows through Seerr (the Overseerr/Jellyseerr successor). The first time a user requests something, the bot asks for their Plex username/email and links their Discord account to their Seerr user, so every request is attributed to them and their per-user quotas/limits are respected. The link is stored locally (SQLite) and written back into Seerr notification settings. No inbound ports or WebUI &#8212; the bot only makes outbound connections.</Overview>
+  <Overview>A Discord bot that requests movies and TV shows through Seerr (the Overseerr/Jellyseerr successor). The first time a user requests something, the bot asks for their Plex username/email and links their Discord account to their Seerr user, so every request is attributed to them and their per-user quotas/limits are respected. The link is stored locally (SQLite) and written back into Seerr notification settings.&#10;&#10;Features: /movie and /tv search with availability indicators and season selection; /quota shows remaining limits and reset time; DM notifications when a request becomes available or is declined; and an optional password-protected admin dashboard (set a Dashboard Password to enable it on port 5056) for managing links, viewing activity, and toggling settings.</Overview>
   <Category>MediaApp:Other Tools:Other</Category>
   <WebUI>http://[IP]:[PORT:5056]/</WebUI>
   <TemplateURL>https://raw.githubusercontent.com/vancityactivist/vaultrequestrr/main/unraid/vaultrequestrr.xml</TemplateURL>
@@ -20,7 +20,7 @@
   <DateInstalled/>
   <DonateText/>
   <DonateLink/>
-  <Description>A Discord bot that requests media via Seerr with self-service Plex account linking so per-user quotas are respected. Set your Discord bot token and Seerr admin API key below.</Description>
+  <Description>A Discord bot that requests media via Seerr with self-service Plex account linking so per-user quotas are respected. Set your Discord bot token and Seerr admin API key below. Optionally set a Dashboard Password to enable the admin web UI on port 5056.</Description>
   <Config Name="Data Directory" Target="/data" Default="/mnt/user/appdata/vaultrequestrr" Mode="rw" Description="Stores the SQLite database of Discord&#8596;Seerr account links. Keep this on persistent storage." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/vaultrequestrr</Config>
   <Config Name="Discord Bot Token" Target="DISCORD_TOKEN" Default="" Mode="" Description="Bot token from https://discord.com/developers/applications (Bot tab)." Type="Variable" Display="always" Required="true" Mask="true"/>
   <Config Name="Seerr URL" Target="SEERR_URL" Default="http://192.168.1.10:5055" Mode="" Description="Base URL of your Seerr instance, including port. Use your LAN address, e.g. http://10.10.0.10:5055" Type="Variable" Display="always" Required="true" Mask="false">http://192.168.1.10:5055</Config>
