@@ -50,6 +50,28 @@ async def test_find_user_prefers_email_then_plex():
         await client.aclose()
 
 
+# -- search query encoding -------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_search_fully_encodes_reserved_characters():
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        return httpx.Response(200, json={"results": []})
+
+    client = make_client(handler)
+    try:
+        await client.search("Mission: Impossible", "movie")
+    finally:
+        await client.aclose()
+
+    # The colon and space must be percent-encoded, not left raw (Seerr 400s otherwise),
+    # and must not be double-encoded (%253A).
+    assert "query=Mission%3A%20Impossible" in captured["url"]
+
+
 # -- create_request body ---------------------------------------------------
 
 

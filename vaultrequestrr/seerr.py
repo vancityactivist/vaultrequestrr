@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Sequence
+from urllib.parse import quote
 
 import httpx
 
@@ -141,10 +142,12 @@ class SeerrClient:
     # -- search & details --------------------------------------------------
 
     async def search(self, query: str, media_type: MediaType) -> list[SearchResult]:
-        data = await self._get(
-            "search",
-            params={"query": query, "page": 1, "language": "en"},
-        )
+        # Seerr requires the query value to be fully percent-encoded, including
+        # reserved characters like ":" (e.g. "Mission: Impossible"). httpx's
+        # default param encoding leaves those untouched, so we encode it
+        # ourselves with safe="" and build the query string directly.
+        encoded = quote(query, safe="")
+        data = await self._get(f"search?query={encoded}&page=1&language=en")
         results = []
         for raw in data.get("results", []):
             if raw.get("mediaType") != media_type:
