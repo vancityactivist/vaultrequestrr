@@ -1,0 +1,10 @@
+services:
+  vaultrequestrr:
+    build: .
+    container_name: vaultrequestrr
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_PATH: /data/vaultrequestrr.sqlite3
+    volumes:
+      - ./data:/data
