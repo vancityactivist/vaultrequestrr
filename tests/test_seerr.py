@@ -204,8 +204,11 @@ async def test_quota_unlimited_and_limited():
     }
 
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/api/v1/user/9/quota"
-        return httpx.Response(200, json=payload)
+        if request.url.path == "/api/v1/user/9/quota":
+            return httpx.Response(200, json=payload)
+        # reset lookup for the limited tv quota
+        assert request.url.path == "/api/v1/user/9/requests"
+        return httpx.Response(200, json={"results": []})
 
     client = make_client(handler)
     try:
@@ -217,6 +220,45 @@ async def test_quota_unlimited_and_limited():
     assert quota.movie.remaining is None
     assert not quota.tv.unlimited
     assert quota.tv.remaining == 3  # 5 - 2
+
+
+@pytest.mark.asyncio
+async def test_quota_reset_uses_oldest_in_window_request():
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    in_window_old = (now - timedelta(days=3)).isoformat().replace("+00:00", "Z")
+    in_window_new = (now - timedelta(days=1)).isoformat().replace("+00:00", "Z")
+    out_of_window = (now - timedelta(days=20)).isoformat().replace("+00:00", "Z")
+
+    quota_payload = {
+        "movie": {"days": 7, "limit": 5, "used": 2, "restricted": False},
+        "tv": {"days": 7, "limit": 0, "used": 0, "restricted": False},
+    }
+    requests_payload = {
+        "results": [
+            {"type": "movie", "createdAt": in_window_new},
+            {"type": "movie", "createdAt": in_window_old},
+            {"type": "movie", "createdAt": out_of_window},  # ignored, outside window
+            {"type": "tv", "createdAt": in_window_new},  # wrong type, ignored
+        ]
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/quota"):
+            return httpx.Response(200, json=quota_payload)
+        return httpx.Response(200, json=requests_payload)
+
+    client = make_client(handler)
+    try:
+        quota = await client.get_quota(9)
+    finally:
+        await client.aclose()
+
+    assert quota.movie.reset_at is not None
+    # reset = oldest in-window (3 days ago) + 7-day window => ~4 days from now
+    delta_days = (quota.movie.reset_at - now).total_seconds() / 86400
+    assert 3.9 < delta_days < 4.1
 
 
 @pytest.mark.asyncio

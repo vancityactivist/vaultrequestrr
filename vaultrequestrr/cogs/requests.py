@@ -253,7 +253,22 @@ class SeasonSelectView(discord.ui.View):
         self._cog = cog
         self._result = result
         self.selected: list[int] | str = "all"
+        self._available = {s.season_number for s in details.seasons if s.available}
+        self._all = {s.season_number for s in details.seasons}
         self.add_item(SeasonSelect(details))
+        self.update_request_state()
+
+    def _selected_numbers(self) -> set[int]:
+        return set(self._all) if self.selected == "all" else set(self.selected)
+
+    def update_request_state(self) -> None:
+        """Disable Request when every selected season is already available."""
+        if self._all and self._all <= self._available:
+            self.request.disabled = True
+            self.request.label = "All seasons available"
+        else:
+            self.request.disabled = not (self._selected_numbers() - self._available)
+            self.request.label = "Request"
 
     @discord.ui.button(label="Request", style=discord.ButtonStyle.success, row=1)
     async def request(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
@@ -290,7 +305,8 @@ class SeasonSelect(discord.ui.Select):
             view.selected = "all"
         else:
             view.selected = [int(v) for v in self.values]
-        await interaction.response.defer()  # acknowledge without changing the message
+        view.update_request_state()
+        await interaction.response.edit_message(view=view)
 
 
 class ConfirmView(discord.ui.View):
@@ -306,6 +322,11 @@ class ConfirmView(discord.ui.View):
         self._media_type = media_type
         self._result = result
         self._seasons = seasons
+
+        # Nothing to request if it's already fully available — grey out the button.
+        if result.available:
+            self.request.disabled = True
+            self.request.label = "Already available"
 
     @discord.ui.button(label="Request", style=discord.ButtonStyle.success)
     async def request(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
@@ -419,7 +440,13 @@ def _season_emoji_text(season: SeasonInfo) -> tuple[str | None, str | None]:
 def _quota_line(quota: QuotaStatus) -> str:
     if quota.unlimited:
         return "Unlimited"
-    return f"{quota.remaining} of {quota.limit} left ({quota.used} used in the last {quota.days} days)"
+    line = (
+        f"**{quota.remaining}** of **{quota.limit}** left "
+        f"({quota.used} used in the last {quota.days} days)"
+    )
+    if quota.reset_at is not None:
+        line += f"\nNext request opens <t:{int(quota.reset_at.timestamp())}:R>"
+    return line
 
 
 def _quota_embed(quota: UserQuota) -> discord.Embed:

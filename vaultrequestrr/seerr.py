@@ -7,7 +7,8 @@ search, media details, user lookup, per-user notification settings
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Sequence
 from urllib.parse import quote
 
@@ -92,6 +93,7 @@ class QuotaStatus:
     remaining: int | None  # None when unlimited
     restricted: bool  # True when the user has hit their limit
     days: int
+    reset_at: datetime | None = None  # when the next slot frees (rolling window)
 
     @property
     def unlimited(self) -> bool:
@@ -221,10 +223,46 @@ class SeerrClient:
 
     async def get_quota(self, user_id: int) -> UserQuota:
         data = await self._get(f"user/{user_id}/quota")
-        return UserQuota(
-            movie=_to_quota(data.get("movie") or {}),
-            tv=_to_quota(data.get("tv") or {}),
-        )
+        movie = _to_quota(data.get("movie") or {})
+        tv = _to_quota(data.get("tv") or {})
+
+        # For limited quotas with usage, compute when the next slot frees: the
+        # oldest request still inside the rolling window, plus the window length.
+        if (movie.limit and movie.used) or (tv.limit and tv.used):
+            resets = await self._compute_quota_resets(user_id, movie, tv)
+            movie = replace(movie, reset_at=resets.get("movie"))
+            tv = replace(tv, reset_at=resets.get("tv"))
+
+        return UserQuota(movie=movie, tv=tv)
+
+    async def _compute_quota_resets(
+        self, user_id: int, movie: QuotaStatus, tv: QuotaStatus
+    ) -> dict[str, datetime | None]:
+        try:
+            data = await self._get(
+                f"user/{user_id}/requests", params={"take": 100, "skip": 0}
+            )
+        except SeerrError as exc:
+            logger.debug("Could not load requests for quota reset: %s", exc)
+            return {}
+
+        now = datetime.now(timezone.utc)
+        results = data.get("results", [])
+        out: dict[str, datetime | None] = {}
+        for media_type, quota in (("movie", movie), ("tv", tv)):
+            if not (quota.limit and quota.used and quota.days):
+                continue
+            cutoff = now - timedelta(days=quota.days)
+            in_window = [
+                ts
+                for r in results
+                if r.get("type") == media_type
+                and (ts := _parse_dt(r.get("createdAt"))) is not None
+                and ts >= cutoff
+            ]
+            if in_window:
+                out[media_type] = min(in_window) + timedelta(days=quota.days)
+        return out
 
     # -- users -------------------------------------------------------------
 
@@ -322,6 +360,15 @@ def _to_search_result(raw: dict[str, Any]) -> SearchResult:
         poster_url=f"https://image.tmdb.org/t/p/w500{poster}" if poster else None,
         status=media_info.get("status"),
     )
+
+
+def _parse_dt(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def _to_quota(raw: dict[str, Any]) -> QuotaStatus:

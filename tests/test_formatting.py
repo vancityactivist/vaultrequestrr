@@ -30,6 +30,18 @@ def test_quota_line_unlimited():
     assert _quota_line(q) == "Unlimited"
 
 
-def test_quota_line_limited():
+def test_quota_line_limited_shows_total():
     q = QuotaStatus(limit=5, used=2, remaining=3, restricted=False, days=30)
-    assert _quota_line(q) == "3 of 5 left (2 used in the last 30 days)"
+    line = _quota_line(q)
+    assert "**3**" in line and "**5**" in line  # remaining of total
+    assert "2 used in the last 30 days" in line
+    assert "opens" not in line  # no reset when reset_at is None
+
+
+def test_quota_line_includes_reset_timestamp():
+    from datetime import datetime, timezone
+
+    reset = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    q = QuotaStatus(limit=5, used=5, remaining=0, restricted=True, days=7, reset_at=reset)
+    line = _quota_line(q)
+    assert f"<t:{int(reset.timestamp())}:R>" in line
