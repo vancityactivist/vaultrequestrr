@@ -87,11 +87,7 @@ docker run -d --name vaultrequestrr --restart unless-stopped \
 The image is published to GHCR and there's a ready-made Unraid template at
 [`unraid/vaultrequestrr.xml`](unraid/vaultrequestrr.xml).
 
-1. **Ensure the GHCR package is public.** When the repo is public, GHCR usually
-   publishes the linked package as public automatically. If Unraid can't pull it,
-   make it public manually: GitHub → your profile → **Packages** → `vaultrequestrr`
-   → **Package settings** → Change visibility → **Public**.
-2. **Install the template into Unraid's user-templates folder.** The Add Container
+1. **Install the template into Unraid's user-templates folder.** The Add Container
    **Template** field is a dropdown — you cannot paste a URL into it, so the XML has
    to live in `/boot/config/plugins/dockerMan/templates-user/` first. From the Unraid
    web terminal:
@@ -102,9 +98,9 @@ The image is published to GHCR and there's a ready-made Unraid template at
    (Or copy `unraid/vaultrequestrr.xml` onto the `flash` share at
    `config/plugins/dockerMan/templates-user/my-vaultrequestrr.xml`.) The `my-` prefix
    and this folder are what make it appear in the dropdown.
-3. On Unraid: **Docker** tab → **Add Container** → in the **Template** dropdown, under
+2. On Unraid: **Docker** tab → **Add Container** → in the **Template** dropdown, under
    **User templates**, select **VaultRequestrr**.
-4. Fill in the fields the template exposes — **Discord Bot Token**, **Seerr URL**,
+3. Fill in the fields the template exposes — **Discord Bot Token**, **Seerr URL**,
    **Seerr API Key**, and optionally **Discord Guild ID** — set the **Data Directory**
    (defaults to `/mnt/user/appdata/vaultrequestrr`), then **Apply**.
 
