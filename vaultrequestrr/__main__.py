@@ -6,6 +6,7 @@ import sys
 
 from .bot import VaultRequestrr
 from .config import Config, ConfigError
+from .logbuffer import install as install_log_buffer
 
 
 def main() -> int:
@@ -19,6 +20,7 @@ def main() -> int:
         level=getattr(logging, config.log_level, logging.INFO),
         format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
     )
+    install_log_buffer()  # capture recent logs for the web dashboard
 
     bot = VaultRequestrr(config)
     bot.run(config.discord_token, log_handler=None)

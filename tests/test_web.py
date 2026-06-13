@@ -96,6 +96,23 @@ async def test_settings_toggle_updates_runtime(client):
 
 
 @pytest.mark.asyncio
+async def test_logs_page_shows_records(client):
+    import logging
+
+    from vaultrequestrr import logbuffer
+
+    cli, _store, _dash = client
+    await cli.post("/login", data={"password": "secret"})
+    logbuffer.install()
+    logging.getLogger("vaultrequestrr.webtest").warning("LOGS-PAGE-MARKER")
+
+    resp = await cli.get("/logs")
+    assert resp.status == 200
+    text = await resp.text()
+    assert "LOGS-PAGE-MARKER" in text
+
+
+@pytest.mark.asyncio
 async def test_unlink_action(client):
     cli, store, _dash = client
     await store.save("999", 7, "alice", "a@e.com")

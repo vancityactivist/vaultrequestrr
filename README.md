@@ -44,7 +44,8 @@ requests made through the bot are tracked.
 
 If `WEB_PASSWORD` is set, a small web dashboard is served on `WEB_PORT` (default
 `5056`): health (Discord/Seerr status), linked accounts (with unlink/remap),
-recent request activity, and live-toggleable settings. Sign in with the password.
+recent request activity, live log viewer (level filter + auto-refresh), and
+live-toggleable settings. Sign in with the password.
 
 Commands:
 

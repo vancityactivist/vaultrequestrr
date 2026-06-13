@@ -10,11 +10,15 @@ import hmac
 import html
 import logging
 import secrets
+from datetime import datetime
 
 from aiohttp import web
 
 from .linking import LinkStatus
+from .logbuffer import get_records
 from .seerr import REQUEST_DECLINED, STATUS_AVAILABLE, SeerrError
+
+_LEVELS = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40, "CRITICAL": 50}
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +43,7 @@ class WebDashboard:
                 web.post("/links/unlink", self.unlink_action),
                 web.post("/links/remap", self.remap_action),
                 web.get("/activity", self.activity_page),
+                web.get("/logs", self.logs_page),
                 web.post("/settings", self.settings_action),
             ]
         )
@@ -203,6 +208,55 @@ class WebDashboard:
         """
         return _html(_layout("Activity", body))
 
+    async def logs_page(self, request: web.Request) -> web.Response:
+        level = request.query.get("level", "").upper()
+        auto = request.query.get("auto") == "1"
+        min_level = _LEVELS.get(level, 0)
+
+        lines = ""
+        for r in reversed(get_records()):  # newest first
+            if _LEVELS.get(r.level, 0) < min_level:
+                continue
+            ts = datetime.fromtimestamp(r.created).strftime("%m-%d %H:%M:%S")
+            lines += (
+                f'<div class="logline lvl-{html.escape(r.level)}">'
+                f'<span class="ts">{ts}</span>'
+                f'<span class="lvl">{html.escape(r.level)}</span>'
+                f'<span class="lname">{html.escape(_short_name(r.name))}</span>'
+                f'<span class="lmsg">{html.escape(r.message)}</span></div>'
+            )
+        if not lines:
+            lines = '<p class="muted">No log records yet.</p>'
+
+        def flink(label: str, value: str) -> str:
+            q = f"?level={value}" if value else "?"
+            if auto:
+                q += ("&" if "=" in q else "") + "auto=1"
+            active = "active" if level == value else ""
+            return f'<a class="chip {active}" href="/logs{q}">{label}</a>'
+
+        filters = "".join(
+            flink(lbl, val)
+            for lbl, val in (("All", ""), ("Info", "INFO"), ("Warning", "WARNING"), ("Error", "ERROR"))
+        )
+        auto_href = "/logs" + (f"?level={level}" if level else "")
+        auto_toggle = (
+            f'<a class="chip {"active" if auto else ""}" href="{auto_href}{"&" if level else "?"}auto={"0" if auto else "1"}">Auto-refresh</a>'
+        )
+        refresh_script = "<script>setTimeout(function(){location.reload()},10000)</script>" if auto else ""
+
+        body = f"""
+        <div class="card">
+          <div class="logbar">
+            <h2>Logs</h2>
+            <div class="filters">{filters}{auto_toggle}<a class="chip" href="/logs{('?level=' + level) if level else ''}">↻ Refresh</a></div>
+          </div>
+          <div class="logs">{lines}</div>
+        </div>
+        {refresh_script}
+        """
+        return _html(_layout("Logs", body))
+
     # -- actions -----------------------------------------------------------
 
     async def unlink_action(self, request: web.Request) -> web.Response:
@@ -254,7 +308,7 @@ def _layout(title: str, body: str, *, nav: bool = True) -> str:
         <nav class="nav">
           <a class="brand" href="/">VaultRequestrr</a>
           <div class="links">
-            <a href="/">Dashboard</a><a href="/links">Links</a><a href="/activity">Activity</a>
+            <a href="/">Dashboard</a><a href="/links">Links</a><a href="/activity">Activity</a><a href="/logs">Logs</a>
             <a href="/logout" class="muted">Sign out</a>
           </div>
         </nav>
@@ -293,7 +347,22 @@ label.check{display:block;margin:8px 0}label.field{display:block;margin:12px 0}
 .error{color:var(--bad);min-height:18px}.flash{background:#23314a;border:1px solid var(--accent);padding:10px 14px;border-radius:8px;margin:8px 0}
 .badge{padding:2px 8px;border-radius:999px;font-size:12px}.badge.ok{background:rgba(59,165,93,.2);color:var(--ok)}
 .badge.bad{background:rgba(237,66,69,.2);color:var(--bad)}.badge.pend{background:rgba(136,145,160,.2);color:var(--muted)}
+.logbar{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px}
+.filters{display:flex;gap:6px;flex-wrap:wrap}
+.chip{font-size:13px;padding:4px 10px;border-radius:999px;border:1px solid var(--line);color:var(--fg);text-decoration:none}
+.chip:hover{border-color:var(--accent)}.chip.active{background:var(--accent);border-color:var(--accent)}
+.logs{margin-top:12px;font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;max-height:65vh;overflow:auto;background:#0c0e12;border:1px solid var(--line);border-radius:8px;padding:10px}
+.logline{display:grid;grid-template-columns:96px 64px 150px 1fr;gap:8px;padding:2px 0;border-bottom:1px solid rgba(42,46,56,.5);white-space:pre-wrap;word-break:break-word}
+.logline .ts{color:var(--muted)}.logline .lname{color:var(--muted)}
+.logline .lvl{font-weight:600}
+.lvl-WARNING .lvl{color:#e3a008}.lvl-ERROR .lvl,.lvl-CRITICAL .lvl{color:var(--bad)}.lvl-DEBUG{opacity:.7}
+.lvl-ERROR .lmsg,.lvl-CRITICAL .lmsg{color:#f7a6a7}
 """
+
+
+def _short_name(name: str) -> str:
+    # "discord.gateway" -> "discord.gateway"; trim very long names.
+    return name if len(name) <= 28 else name[:27] + "…"
 
 
 def _dot(ok: bool) -> str:
