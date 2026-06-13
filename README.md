@@ -71,6 +71,38 @@ docker compose up -d --build
 ```
 The SQLite link store is persisted to `./data`.
 
+To run the pre-built published image instead of building locally:
+```bash
+docker run -d --name vaultrequestrr --restart unless-stopped \
+  -e DISCORD_TOKEN=... \
+  -e SEERR_URL=http://10.10.0.10:5055 \
+  -e SEERR_API_KEY=... \
+  -e DISCORD_GUILD_ID=... \
+  -v /path/to/data:/data \
+  ghcr.io/vancityactivist/vaultrequestrr:latest
+```
+
+### 4c. Run on Unraid
+
+The image is published to GHCR and there's a ready-made Unraid template at
+[`unraid/vaultrequestrr.xml`](unraid/vaultrequestrr.xml).
+
+1. **Make the GHCR package public** (one-time, after the first CI build):
+   GitHub → your profile → Packages → `vaultrequestrr` → Package settings →
+   Change visibility → Public. (Otherwise Unraid needs registry credentials.)
+2. On Unraid: **Docker** tab → **Add Container**.
+3. In the **Template** dropdown paste the template URL:
+   `https://raw.githubusercontent.com/vancityactivist/vaultrequestrr/main/unraid/vaultrequestrr.xml`
+   — or copy `unraid/vaultrequestrr.xml` to
+   `/boot/config/plugins/dockerMan/templates-user/my-vaultrequestrr.xml` and pick it
+   from the **User templates** section.
+4. Fill in the fields the template exposes — **Discord Bot Token**, **Seerr URL**,
+   **Seerr API Key**, and optionally **Discord Guild ID** — set the **Data Directory**
+   (defaults to `/mnt/user/appdata/vaultrequestrr`), then **Apply**.
+
+The bot needs no inbound ports or WebUI; it only makes outbound connections to
+Discord and Seerr.
+
 ## Configuration reference
 
 | Variable | Required | Default | Description |
