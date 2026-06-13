@@ -18,6 +18,21 @@ def test_result_view_single_page_has_no_page_buttons():
     assert not [c for c in v.children if isinstance(c, _PageButton)]
 
 
+def test_result_select_dedupes_duplicate_ids():
+    # Two results with the same tmdb id must collapse to one option value
+    # (Discord rejects duplicate select option values).
+    dupes = [
+        SearchResult("movie", 5, "A", "2020", "x", None, None),
+        SearchResult("movie", 5, "A again", "2020", "x", None, None),
+        SearchResult("movie", 6, "B", "2020", "x", None, None),
+    ]
+    v = ResultSelectView(None, "movie", dupes)
+    sel = next(c for c in v.children if isinstance(c, ResultSelect))
+    values = [o.value for o in sel.options]
+    assert values == ["5", "6"]
+    assert len(values) == len(set(values))
+
+
 def test_result_view_paginates():
     v = ResultSelectView(None, "movie", _results(57))
     assert v._max_page == 2  # 25 + 25 + 7

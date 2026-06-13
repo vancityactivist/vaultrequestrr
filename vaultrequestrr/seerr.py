@@ -192,6 +192,7 @@ class SeerrClient:
         # ourselves with safe="" and build the query string directly.
         encoded = quote(query, safe="")
         results: list[SearchResult] = []
+        seen: set[int] = set()
         page = 1
         total_pages = 1
         while page <= total_pages and page <= max_pages and len(results) < limit:
@@ -200,7 +201,13 @@ class SeerrClient:
             for raw in data.get("results", []):
                 if raw.get("mediaType") != media_type:
                     continue
-                results.append(_to_search_result(raw))
+                result = _to_search_result(raw)
+                # The same title can appear on more than one page; keep it unique
+                # so the Discord select doesn't get duplicate option values.
+                if result.tmdb_id in seen:
+                    continue
+                seen.add(result.tmdb_id)
+                results.append(result)
             page += 1
         return results[:limit]
 

@@ -100,6 +100,29 @@ async def test_search_fetches_multiple_pages():
     assert [r.tmdb_id for r in results] == [1, 3]  # tv filtered out, movies combined
 
 
+@pytest.mark.asyncio
+async def test_search_dedupes_across_pages():
+    # Same title (id 7) appears on both pages — must be returned only once.
+    pages = {
+        1: {"page": 1, "totalPages": 2, "results": [{"id": 7, "mediaType": "movie", "title": "Dup"}]},
+        2: {"page": 2, "totalPages": 2, "results": [
+            {"id": 7, "mediaType": "movie", "title": "Dup"},
+            {"id": 8, "mediaType": "movie", "title": "Other"},
+        ]},
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=pages[int(request.url.params["page"])])
+
+    client = make_client(handler)
+    try:
+        results = await client.search("dup", "movie")
+    finally:
+        await client.aclose()
+
+    assert [r.tmdb_id for r in results] == [7, 8]  # 7 not repeated
+
+
 # -- create_request body ---------------------------------------------------
 
 

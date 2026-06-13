@@ -243,6 +243,16 @@ class ResultSelect(discord.ui.Select):
     def __init__(self, cog: RequestCog, media_type: str, results: list[SearchResult]) -> None:
         self._cog = cog
         self._media_type = media_type
+        # De-duplicate by tmdb id so the select never has duplicate option values.
+        unique: list[SearchResult] = []
+        seen: set[int] = set()
+        for r in results:
+            if r.tmdb_id in seen:
+                continue
+            seen.add(r.tmdb_id)
+            unique.append(r)
+        results = unique
+
         self._results = {str(r.tmdb_id): r for r in results}
         options = []
         for r in results:
@@ -329,7 +339,13 @@ class SeasonSelectView(discord.ui.View):
 class SeasonSelect(discord.ui.Select):
     def __init__(self, details: TvDetails) -> None:
         options = [discord.SelectOption(label="All seasons", value="all", default=True)]
-        for season in details.seasons[: MAX_SELECT_OPTIONS - 1]:
+        seen: set[int] = set()
+        for season in details.seasons:
+            if season.season_number in seen:
+                continue
+            seen.add(season.season_number)
+            if len(options) >= MAX_SELECT_OPTIONS:
+                break
             emoji, status_text = _season_emoji_text(season)
             options.append(
                 discord.SelectOption(
