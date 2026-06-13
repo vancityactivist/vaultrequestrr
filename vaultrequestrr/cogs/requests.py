@@ -145,7 +145,9 @@ class RequestCog(commands.Cog):
         else:
             user_id = self.bot.config.default_seerr_user_id
 
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        # Deferred *update* (no new "thinking" message): we'll edit the picker
+        # message in place with the result.
+        await interaction.response.defer()
         await self._submit(interaction, media_type, result, seasons, user_id)
 
     async def _submit(
@@ -165,6 +167,7 @@ class RequestCog(commands.Cog):
                 seasons=seasons,
             )
         except SeerrError as exc:
+            # Keep the picker so the user can retry; report the error separately.
             await interaction.followup.send(
                 f"⚠️ Couldn't submit the request: {exc}", ephemeral=True
             )
@@ -191,7 +194,8 @@ class RequestCog(commands.Cog):
             except SeerrError:
                 pass  # never fail a successful request just because quota lookup did
 
-        await interaction.followup.send(embed=embed, ephemeral=True)
+        # Replace the picker message in place with the confirmation.
+        await interaction.edit_original_response(content=None, embed=embed, view=None)
 
 
 # ---------------------------------------------------------------------------
@@ -422,13 +426,13 @@ class PlexLinkModal(discord.ui.Modal, title="Link your Plex account"):
         self._seasons = seasons
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        # Deferred *update* so we can edit the original picker message in place.
+        await interaction.response.defer()
         discord_id = str(interaction.user.id)
         result = await self._cog.bot.linker.link(discord_id, str(self.identity.value))
 
         if result.status is LinkStatus.LINKED:
-            who = result.user.plex_username or result.user.email or f"user #{result.user.id}"
-            await interaction.followup.send(f"✅ Linked to **{who}**. Submitting your request…", ephemeral=True)
+            # _submit edits the picker message in place with the confirmation.
             await self._cog._submit(
                 interaction, self._media_type, self._result, self._seasons, result.user.id
             )
