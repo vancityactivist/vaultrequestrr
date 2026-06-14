@@ -112,20 +112,16 @@ class NotificationService:
         kind = "📺 TV show" if tracked.media_type == "tv" else "🎬 Movie"
 
         if available:
-            embed = discord.Embed(
-                title="✅ Now available",
-                description=f"**{title}** is ready to watch — enjoy! 🍿",
-                color=discord.Color.green(),
-            )
+            heading = "✅ Now available"
+            description = f"**{title}** is ready to watch — enjoy! 🍿"
+            color = discord.Color.green()
         else:
-            embed = discord.Embed(
-                title="❌ Request declined",
-                description=f"Your request for **{title}** was declined.",
-                color=discord.Color.red(),
-            )
-        embed.add_field(name="Type", value=kind, inline=True)
+            heading = "❌ Request declined"
+            description = f"Your request for **{title}** was declined."
+            color = discord.Color.red()
 
         # Cover art — fetch the poster for a richer DM (best-effort).
+        poster_url = None
         if tracked.tmdb_id is not None:
             try:
                 poster_url = await self.bot.seerr.get_poster_url(
@@ -133,16 +129,28 @@ class NotificationService:
                 )
             except SeerrError:
                 poster_url = None
-            if poster_url:
-                embed.set_thumbnail(url=poster_url)
+
+        # Discord renders a full-width embed image at the bottom of its embed, so
+        # to get prominent artwork *above* the text we stack two embeds: a banner
+        # (heading + full-width poster) on top, then the details below it.
+        embeds: list[discord.Embed] = []
+        if poster_url:
+            banner = discord.Embed(title=heading, color=color)
+            banner.set_image(url=poster_url)
+            embeds.append(banner)
+            body = discord.Embed(description=description, color=color)
+        else:
+            body = discord.Embed(title=heading, description=description, color=color)
+        body.add_field(name="Type", value=kind, inline=True)
 
         # Remind them what's left in their quota (best-effort).
-        await self._add_quota_field(embed, tracked)
+        await self._add_quota_field(body, tracked)
 
-        embed.set_footer(text="VaultRequestrr")
+        body.set_footer(text="VaultRequestrr")
+        embeds.append(body)
 
         try:
-            await user.send(embed=embed)
+            await user.send(embeds=embeds)
         except discord.Forbidden:
             logger.info("User %s has DMs disabled; skipping notification", tracked.discord_id)
         except discord.HTTPException as exc:

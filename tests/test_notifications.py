@@ -32,9 +32,11 @@ class FakeUser:
         self._sink = sink
         self._embeds = embeds
 
-    async def send(self, embed=None):
-        self._sink.append((self.id, embed.title if embed else None))
-        self._embeds.append(embed)
+    async def send(self, embed=None, embeds=None):
+        items = embeds if embeds is not None else ([embed] if embed else [])
+        title = next((e.title for e in items if e.title), None)
+        self._sink.append((self.id, title))
+        self._embeds.extend(items)
 
 
 class FakeSeerr:
@@ -88,10 +90,11 @@ async def test_notifies_on_available(store):
     assert bot.sent == [(42, "✅ Now available")]
     assert await store.pending_tracked() == []  # finalised
 
-    # Richer DM: cover art thumbnail + a remaining-quota reminder.
-    embed = bot.embeds[0]
-    assert embed.thumbnail.url == "https://image.tmdb.org/t/p/w500/603.jpg"
-    quota_fields = [f for f in embed.fields if "quota" in f.name.lower()]
+    # Richer DM: a full-width cover-art banner above the details, plus a
+    # remaining-quota reminder.
+    banner, body = bot.embeds
+    assert banner.image.url == "https://image.tmdb.org/t/p/w500/603.jpg"
+    quota_fields = [f for f in body.fields if "quota" in f.name.lower()]
     assert quota_fields and "3" in quota_fields[0].value
 
 
