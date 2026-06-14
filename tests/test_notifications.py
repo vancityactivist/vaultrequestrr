@@ -8,8 +8,10 @@ from vaultrequestrr.seerr import (
     REQUEST_PENDING,
     STATUS_AVAILABLE,
     STATUS_PROCESSING,
+    QuotaStatus,
     RequestInfo,
     SeerrError,
+    UserQuota,
 )
 from vaultrequestrr.store import LinkStore
 
@@ -25,12 +27,14 @@ async def store(tmp_path):
 
 
 class FakeUser:
-    def __init__(self, user_id, sink):
+    def __init__(self, user_id, sink, embeds):
         self.id = user_id
         self._sink = sink
+        self._embeds = embeds
 
     async def send(self, embed=None):
         self._sink.append((self.id, embed.title if embed else None))
+        self._embeds.append(embed)
 
 
 class FakeSeerr:
@@ -43,6 +47,13 @@ class FakeSeerr:
             raise self.exc
         return self.info
 
+    async def get_poster_url(self, media_type, tmdb_id):
+        return f"https://image.tmdb.org/t/p/w500/{tmdb_id}.jpg"
+
+    async def get_quota(self, user_id):
+        q = QuotaStatus(limit=5, used=2, remaining=3, restricted=False, days=7)
+        return UserQuota(movie=q, tv=q)
+
 
 class FakeBot:
     def __init__(self, store, seerr, *, notify_available=True, notify_declined=True):
@@ -54,9 +65,10 @@ class FakeBot:
             notify_on_declined=notify_declined,
         )
         self.sent = []
+        self.embeds = []
 
     async def fetch_user(self, user_id):
-        return FakeUser(user_id, self.sent)
+        return FakeUser(user_id, self.sent, self.embeds)
 
 
 async def _track(store, request_id=10, media_type="movie", title="The Matrix"):
@@ -66,6 +78,7 @@ async def _track(store, request_id=10, media_type="movie", title="The Matrix"):
 @pytest.mark.asyncio
 async def test_notifies_on_available(store):
     await _track(store)
+    await store.save("42", 7, "neo", "neo@example.com")
     info = RequestInfo(id=10, request_status=REQUEST_PENDING, media_status=STATUS_AVAILABLE, media_type="movie", tmdb_id=603)
     bot = FakeBot(store, FakeSeerr(info))
     svc = NotificationService(bot)
@@ -74,6 +87,12 @@ async def test_notifies_on_available(store):
 
     assert bot.sent == [(42, "✅ Now available")]
     assert await store.pending_tracked() == []  # finalised
+
+    # Richer DM: cover art thumbnail + a remaining-quota reminder.
+    embed = bot.embeds[0]
+    assert embed.thumbnail.url == "https://image.tmdb.org/t/p/w500/603.jpg"
+    quota_fields = [f for f in embed.fields if "quota" in f.name.lower()]
+    assert quota_fields and "3" in quota_fields[0].value
 
 
 @pytest.mark.asyncio

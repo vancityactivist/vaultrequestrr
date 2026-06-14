@@ -17,6 +17,7 @@ from .seerr import (
     STATUS_AVAILABLE,
     STATUS_PARTIALLY_AVAILABLE,
     SeerrError,
+    format_quota_line,
 )
 from .store import TrackedRequest
 
@@ -108,10 +109,12 @@ class NotificationService:
         elif tracked.seasons == "all" and tracked.media_type == "tv":
             title = f"{title} (all seasons)"
 
+        kind = "📺 TV show" if tracked.media_type == "tv" else "🎬 Movie"
+
         if available:
             embed = discord.Embed(
                 title="✅ Now available",
-                description=f"**{title}** is ready to watch.",
+                description=f"**{title}** is ready to watch — enjoy! 🍿",
                 color=discord.Color.green(),
             )
         else:
@@ -120,6 +123,23 @@ class NotificationService:
                 description=f"Your request for **{title}** was declined.",
                 color=discord.Color.red(),
             )
+        embed.add_field(name="Type", value=kind, inline=True)
+
+        # Cover art — fetch the poster for a richer DM (best-effort).
+        if tracked.tmdb_id is not None:
+            try:
+                poster_url = await self.bot.seerr.get_poster_url(
+                    tracked.media_type, tracked.tmdb_id
+                )
+            except SeerrError:
+                poster_url = None
+            if poster_url:
+                embed.set_thumbnail(url=poster_url)
+
+        # Remind them what's left in their quota (best-effort).
+        await self._add_quota_field(embed, tracked)
+
+        embed.set_footer(text="VaultRequestrr")
 
         try:
             await user.send(embed=embed)
@@ -127,3 +147,20 @@ class NotificationService:
             logger.info("User %s has DMs disabled; skipping notification", tracked.discord_id)
         except discord.HTTPException as exc:
             logger.warning("Failed to DM user %s: %s", tracked.discord_id, exc)
+
+    async def _add_quota_field(
+        self, embed: discord.Embed, tracked: TrackedRequest
+    ) -> None:
+        """Append a remaining-quota reminder for the tracked media type, if we can."""
+        try:
+            link = await self.bot.store.get(tracked.discord_id)
+            if link is None:
+                return
+            quota = await self.bot.seerr.get_quota(link.seerr_user_id)
+        except SeerrError as exc:
+            logger.debug("Could not load quota for DM to %s: %s", tracked.discord_id, exc)
+            return
+
+        status = quota.tv if tracked.media_type == "tv" else quota.movie
+        label = "📺 TV quota" if tracked.media_type == "tv" else "🎬 Movie quota"
+        embed.add_field(name=label, value=format_quota_line(status), inline=False)

@@ -111,6 +111,19 @@ class UserQuota:
     tv: QuotaStatus
 
 
+def format_quota_line(quota: QuotaStatus) -> str:
+    """Human-readable remaining-quota summary, with Discord markdown."""
+    if quota.unlimited:
+        return "Unlimited"
+    line = (
+        f"**{quota.remaining}** of **{quota.limit}** left "
+        f"({quota.used} used in the last {quota.days} days)"
+    )
+    if quota.reset_at is not None:
+        line += f"\nNext request opens <t:{int(quota.reset_at.timestamp())}:R>"
+    return line
+
+
 @dataclass(frozen=True)
 class RequestInfo:
     id: int
@@ -253,6 +266,17 @@ class SeerrClient:
             title=data.get("name") or data.get("title") or str(tmdb_id),
             seasons=seasons,
         )
+
+    async def get_poster_url(self, media_type: MediaType, tmdb_id: int) -> str | None:
+        """Resolve the TMDB poster URL for a movie or TV title, or None."""
+        endpoint = "tv" if media_type == "tv" else "movie"
+        try:
+            data = await self._get(f"{endpoint}/{tmdb_id}")
+        except SeerrError as exc:
+            logger.debug("Could not load poster for %s/%s: %s", endpoint, tmdb_id, exc)
+            return None
+        poster = data.get("posterPath")
+        return f"https://image.tmdb.org/t/p/w500{poster}" if poster else None
 
     async def get_quota(self, user_id: int) -> UserQuota:
         data = await self._get(f"user/{user_id}/quota")

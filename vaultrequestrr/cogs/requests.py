@@ -21,12 +21,12 @@ from ..seerr import (
     STATUS_PARTIALLY_AVAILABLE,
     STATUS_PENDING,
     STATUS_PROCESSING,
-    QuotaStatus,
     SearchResult,
     SeasonInfo,
     SeerrError,
     TvDetails,
     UserQuota,
+    format_quota_line,
 )
 
 if TYPE_CHECKING:
@@ -189,7 +189,7 @@ class RequestCog(commands.Cog):
         if user_id is not None:
             try:
                 quota = await self.bot.seerr.get_quota(user_id)
-                line = _quota_line(quota.movie if media_type == "movie" else quota.tv)
+                line = format_quota_line(quota.movie if media_type == "movie" else quota.tv)
                 embed.add_field(name="Your remaining quota", value=line, inline=False)
             except SeerrError:
                 pass  # never fail a successful request just because quota lookup did
@@ -504,22 +504,10 @@ def _season_emoji_text(season: SeasonInfo) -> tuple[str | None, str | None]:
     return None, None
 
 
-def _quota_line(quota: QuotaStatus) -> str:
-    if quota.unlimited:
-        return "Unlimited"
-    line = (
-        f"**{quota.remaining}** of **{quota.limit}** left "
-        f"({quota.used} used in the last {quota.days} days)"
-    )
-    if quota.reset_at is not None:
-        line += f"\nNext request opens <t:{int(quota.reset_at.timestamp())}:R>"
-    return line
-
-
 def _quota_embed(quota: UserQuota) -> discord.Embed:
     embed = discord.Embed(title="Your Seerr request quota", color=discord.Color.blurple())
-    embed.add_field(name="🎬 Movies", value=_quota_line(quota.movie), inline=False)
-    embed.add_field(name="📺 TV", value=_quota_line(quota.tv), inline=False)
+    embed.add_field(name="🎬 Movies", value=format_quota_line(quota.movie), inline=False)
+    embed.add_field(name="📺 TV", value=format_quota_line(quota.tv), inline=False)
     return embed
 
 

@@ -1,5 +1,4 @@
 from vaultrequestrr.cogs.requests import (
-    _quota_line,
     _season_emoji_text,
     _status_emoji_text,
 )
@@ -9,6 +8,7 @@ from vaultrequestrr.seerr import (
     STATUS_PROCESSING,
     QuotaStatus,
     SeasonInfo,
+    format_quota_line as _quota_line,
 )
 
 
