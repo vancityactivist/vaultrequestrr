@@ -369,6 +369,24 @@ async def test_create_issue_body():
 
 
 @pytest.mark.asyncio
+async def test_create_issue_includes_season_and_episode():
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(201, json={"id": 6})
+
+    client = make_client(handler)
+    try:
+        await client.create_issue(42, ISSUE_VIDEO, "bad ep", problem_season=1, problem_episode=4)
+    finally:
+        await client.aclose()
+
+    assert captured["body"]["problemSeason"] == 1
+    assert captured["body"]["problemEpisode"] == 4
+
+
+@pytest.mark.asyncio
 async def test_list_issues_parses_results():
     payload = {
         "results": [

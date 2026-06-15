@@ -463,18 +463,31 @@ class SeerrClient:
     # -- issues ------------------------------------------------------------
 
     async def create_issue(
-        self, media_id: int, issue_type: int, message: str
+        self,
+        media_id: int,
+        issue_type: int,
+        message: str,
+        *,
+        problem_season: int | None = None,
+        problem_episode: int | None = None,
     ) -> dict[str, Any]:
         """Report an issue against an in-library media item.
 
         `media_id` is the internal Seerr media DB id (mediaInfo.id), not a tmdbId.
         The issue is attributed to the API key's owner; the reporter is recorded
-        in the message text by the caller.
+        in the message text by the caller. For TV, `problem_season`/`problem_episode`
+        pin the issue to a specific episode.
         """
-        return await self._post(
-            "issue",
-            {"issueType": issue_type, "message": message, "mediaId": media_id},
-        )
+        body: dict[str, Any] = {
+            "issueType": issue_type,
+            "message": message,
+            "mediaId": media_id,
+        }
+        if problem_season is not None:
+            body["problemSeason"] = problem_season
+        if problem_episode is not None:
+            body["problemEpisode"] = problem_episode
+        return await self._post("issue", body)
 
     async def list_issues(self, *, take: int = 100) -> list[IssueInfo]:
         # `filter=all` is required — Seerr defaults to open issues only, which

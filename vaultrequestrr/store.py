@@ -45,11 +45,21 @@ CREATE TABLE IF NOT EXISTS tracked_issues (
     issue_type          INTEGER,
     message             TEXT,
     status              INTEGER,
+    problem_season      INTEGER,
+    problem_episode     INTEGER,
     notified_resolved   INTEGER NOT NULL DEFAULT 0,
     created_at          TEXT NOT NULL,
     updated_at          TEXT
 );
 """
+
+# Columns added after the table first shipped; applied idempotently on connect.
+_MIGRATIONS = {
+    "tracked_issues": {
+        "problem_season": "INTEGER",
+        "problem_episode": "INTEGER",
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -87,6 +97,8 @@ class TrackedIssue:
     issue_type: int | None
     message: str | None
     status: int | None
+    problem_season: int | None
+    problem_episode: int | None
     notified_resolved: bool
     created_at: str
     updated_at: str | None
@@ -104,7 +116,19 @@ class LinkStore:
         self._db = await aiosqlite.connect(self._path)
         self._db.row_factory = aiosqlite.Row
         await self._db.executescript(_SCHEMA)
+        await self._apply_migrations()
         await self._db.commit()
+
+    async def _apply_migrations(self) -> None:
+        """Add columns introduced after a table first shipped (idempotent)."""
+        for table, columns in _MIGRATIONS.items():
+            async with self._db.execute(f"PRAGMA table_info({table})") as cursor:
+                existing = {row["name"] for row in await cursor.fetchall()}
+            for name, decl in columns.items():
+                if name not in existing:
+                    await self._db.execute(
+                        f"ALTER TABLE {table} ADD COLUMN {name} {decl}"
+                    )
 
     async def close(self) -> None:
         if self._db is not None:
@@ -270,23 +294,27 @@ class LinkStore:
         issue_type: int | None,
         message: str | None,
         status: int | None,
+        problem_season: int | None = None,
+        problem_episode: int | None = None,
     ) -> None:
         now = datetime.now(timezone.utc).isoformat()
         await self._conn.execute(
             """
             INSERT INTO tracked_issues
                 (issue_id, discord_id, media_type, tmdb_id, title, issue_type,
-                 message, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 message, status, problem_season, problem_episode, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(issue_id) DO UPDATE SET
                 discord_id = excluded.discord_id,
                 title = excluded.title,
                 issue_type = excluded.issue_type,
                 message = excluded.message,
-                status = excluded.status
+                status = excluded.status,
+                problem_season = excluded.problem_season,
+                problem_episode = excluded.problem_episode
             """,
             (issue_id, discord_id, media_type, tmdb_id, title, issue_type,
-             message, status, now, now),
+             message, status, problem_season, problem_episode, now, now),
         )
         await self._conn.commit()
 
@@ -370,6 +398,8 @@ def _row_to_tracked_issue(row: aiosqlite.Row) -> TrackedIssue:
         issue_type=row["issue_type"],
         message=row["message"],
         status=row["status"],
+        problem_season=row["problem_season"],
+        problem_episode=row["problem_episode"],
         notified_resolved=bool(row["notified_resolved"]),
         created_at=row["created_at"],
         updated_at=row["updated_at"],

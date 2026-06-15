@@ -91,15 +91,23 @@ class IssueCog(commands.Cog):
         issue_type: int,
         reporter: str,
         detail: str,
+        *,
+        season: int | None = None,
+        episode: int | None = None,
     ) -> None:
         """File the issue with Seerr. Assumes the interaction is deferred."""
         discord_id = str(interaction.user.id)
+        where = f" (S{season:02d}E{episode:02d})" if season is not None else ""
         message = (
-            f"Reported by {reporter} (Discord {discord_id}) via VaultRequestrr:\n\n{detail}"
+            f"Reported by {reporter} (Discord {discord_id}) via VaultRequestrr{where}:\n\n{detail}"
         )
         try:
             created = await self.bot.seerr.create_issue(
-                result.media_id, issue_type, message
+                result.media_id,
+                issue_type,
+                message,
+                problem_season=season,
+                problem_episode=episode,
             )
         except SeerrError as exc:
             await interaction.followup.send(
@@ -118,10 +126,14 @@ class IssueCog(commands.Cog):
                 issue_type=issue_type,
                 message=detail,
                 status=ISSUE_OPEN,
+                problem_season=season,
+                problem_episode=episode,
             )
 
         await interaction.edit_original_response(
-            content=None, embed=_issue_success_embed(result, issue_type), view=None
+            content=None,
+            embed=_issue_success_embed(result, issue_type, season, episode),
+            view=None,
         )
 
 
@@ -265,28 +277,60 @@ class IssueTypeSelect(discord.ui.Select):
         )
 
 
-class IssueMessageModal(discord.ui.Modal, title="Describe the problem"):
-    detail = discord.ui.TextInput(
-        label="What's wrong?",
-        placeholder="e.g. No subtitles, audio out of sync, won't play past 20 minutes…",
-        style=discord.TextStyle.paragraph,
-        required=True,
-        max_length=1000,
-    )
-
+class IssueMessageModal(discord.ui.Modal):
     def __init__(
         self, cog: IssueCog, result: SearchResult, issue_type: int, reporter: str
     ) -> None:
-        super().__init__()
+        super().__init__(title="Describe the problem")
         self._cog = cog
         self._result = result
         self._issue_type = issue_type
         self._reporter = reporter
 
+        # For TV, pin the issue to a single episode (needed to re-search just it).
+        self._season: discord.ui.TextInput | None = None
+        self._episode: discord.ui.TextInput | None = None
+        if result.media_type == "tv":
+            self._season = discord.ui.TextInput(
+                label="Season number", placeholder="e.g. 1", required=True, max_length=3
+            )
+            self._episode = discord.ui.TextInput(
+                label="Episode number", placeholder="e.g. 4", required=True, max_length=3
+            )
+            self.add_item(self._season)
+            self.add_item(self._episode)
+
+        self._detail = discord.ui.TextInput(
+            label="What's wrong?",
+            placeholder="e.g. No subtitles, audio out of sync, won't play past 20 minutes…",
+            style=discord.TextStyle.paragraph,
+            required=True,
+            max_length=1000,
+        )
+        self.add_item(self._detail)
+
     async def on_submit(self, interaction: discord.Interaction) -> None:
+        season = episode = None
+        if self._season is not None:
+            try:
+                season = int(str(self._season.value).strip())
+                episode = int(str(self._episode.value).strip())
+            except ValueError:
+                await interaction.response.send_message(
+                    "⚠️ Season and episode must be numbers. Please run `/issue` again.",
+                    ephemeral=True,
+                )
+                return
+
         await interaction.response.defer()
         await self._cog.submit_issue(
-            interaction, self._result, self._issue_type, self._reporter, str(self.detail.value)
+            interaction,
+            self._result,
+            self._issue_type,
+            self._reporter,
+            str(self._detail.value),
+            season=season,
+            episode=episode,
         )
 
 
@@ -301,8 +345,15 @@ def _reporter_name(interaction: discord.Interaction, link) -> str:  # type: igno
     return interaction.user.display_name
 
 
-def _issue_success_embed(result: SearchResult, issue_type: int) -> discord.Embed:
+def _issue_success_embed(
+    result: SearchResult,
+    issue_type: int,
+    season: int | None = None,
+    episode: int | None = None,
+) -> discord.Embed:
     title = result.title + (f" ({result.year})" if result.year else "")
+    if season is not None:
+        title += f" — S{season:02d}E{episode:02d}"
     label = ISSUE_TYPE_LABELS.get(issue_type, "Issue")
     embed = discord.Embed(
         title="✅ Issue reported",

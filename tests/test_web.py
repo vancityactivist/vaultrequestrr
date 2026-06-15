@@ -159,9 +159,9 @@ async def test_issue_research_action_invokes_arr(client, monkeypatch):
 
     calls = []
 
-    async def fake_research(seerr, media_type, tmdb_id):
-        calls.append((media_type, tmdb_id))
-        return "Blocklisted the last download and started a new search."
+    async def fake_research(seerr, media_type, tmdb_id, *, season=None, episode=None):
+        calls.append((media_type, tmdb_id, season, episode))
+        return "Deleted the current file and started a new search."
 
     monkeypatch.setattr("vaultrequestrr.web.research_media", fake_research)
 
@@ -169,7 +169,7 @@ async def test_issue_research_action_invokes_arr(client, monkeypatch):
         "/issues/research", data={"issue_id": "5"}, allow_redirects=False
     )
     assert resp.status == 302 and resp.headers["Location"].startswith("/issues")
-    assert calls == [("movie", 603)]
+    assert calls == [("movie", 603, None, None)]
 
 
 @pytest.mark.asyncio

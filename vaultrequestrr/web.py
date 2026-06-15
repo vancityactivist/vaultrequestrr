@@ -238,9 +238,12 @@ class WebDashboard:
                 who = link.plex_username or link.email or it.discord_id
             action = "reopen" if resolved else "resolve"
             action_label = "Reopen" if resolved else "Resolve"
+            title = it.title or "—"
+            if it.problem_season is not None and it.problem_episode is not None:
+                title += f" S{it.problem_season:02d}E{it.problem_episode:02d}"
             rows += f"""
             <tr>
-              <td>{html.escape(it.title or '—')}</td>
+              <td>{html.escape(title)}</td>
               <td>{html.escape(type_label)}</td>
               <td>{html.escape(who)}</td>
               <td>{badge}</td>
@@ -250,7 +253,7 @@ class WebDashboard:
                   <input type="hidden" name="issue_id" value="{it.issue_id}">
                   <button>{action_label}</button>
                 </form>
-                <form method="post" action="/issues/research" onsubmit="return confirm('Blocklist the last download and search for a new release?')">
+                <form method="post" action="/issues/research" onsubmit="return confirm('Delete the current file and search for a replacement?')">
                   <input type="hidden" name="issue_id" value="{it.issue_id}">
                   <button class="warn">Re-search</button>
                 </form>
@@ -458,7 +461,11 @@ class WebDashboard:
             raise web.HTTPFound("/issues?msg=" + _q("Can't re-search this issue."))
         try:
             result = await research_media(
-                self.bot.seerr, tracked.media_type, tracked.tmdb_id
+                self.bot.seerr,
+                tracked.media_type,
+                tracked.tmdb_id,
+                season=tracked.problem_season,
+                episode=tracked.problem_episode,
             )
         except ArrError as exc:
             raise web.HTTPFound("/issues?msg=" + _q(str(exc)))

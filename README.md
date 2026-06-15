@@ -39,10 +39,11 @@ the selected media/seasons are already present. Results beyond 25 paginate.
 Users run `/issue <title>` to report a problem (Video / Audio / Subtitle /
 Other) with media **already on the server**. The bot searches movies and TV,
 limits results to in-library titles, applies the same link gate as requests, then
-collects a short description and files it to Seerr's issue tracker. Because
-Seerr's API attributes every API-key issue to the admin account, the real
-reporter is recorded in the issue message and tracked locally so the dashboard
-and resolution DMs know who filed it.
+collects a short description and files it to Seerr's issue tracker. For TV the
+form also asks which **season and episode** is affected, so issues are pinned to
+a single episode. Because Seerr's API attributes every API-key issue to the admin
+account, the real reporter is recorded in the issue message and tracked locally so
+the dashboard and resolution DMs know who filed it.
 
 ### Notifications
 
@@ -66,10 +67,12 @@ only the first-run default). It also exposes the bot behaviour toggles and a
 read-only view of the Radarr/Sonarr instances Seerr is wired to.
 
 **Re-search** lets an admin act on a bad download straight from an issue: it
-marks the last grabbed release as failed in Radarr/Sonarr, which blocklists that
-release and triggers a fresh search for a replacement. No extra configuration is
-needed — the Radarr/Sonarr connection details are read from Seerr's own settings
-at the time of the action.
+deletes the current file in Radarr/Sonarr and triggers a fresh search for a
+replacement — for a movie, the movie file; for TV, just the reported episode's
+file. (Radarr/Sonarr can't "blocklist but keep the file" for an already-imported
+release, so removing the file is what reliably forces a new grab.) No extra
+configuration is needed — the Radarr/Sonarr connection details are read from
+Seerr's own settings at the time of the action.
 
 Commands:
 

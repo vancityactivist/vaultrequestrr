@@ -86,6 +86,16 @@ async def test_tracked_issue_roundtrip_and_pending(store):
 
 
 @pytest.mark.asyncio
+async def test_tracked_issue_stores_season_and_episode(store):
+    await store.add_tracked_issue(
+        issue_id=8, discord_id="1", media_type="tv", tmdb_id=95396, title="Severance",
+        issue_type=1, message="bad ep", status=1, problem_season=1, problem_episode=2,
+    )
+    one = await store.get_tracked_issue(8)
+    assert one.problem_season == 1 and one.problem_episode == 2
+
+
+@pytest.mark.asyncio
 async def test_mark_issue_resolved_drops_from_pending(store):
     await store.add_tracked_issue(5, "123", "movie", 603, "X", 1, "m", 1)
     await store.mark_issue(5, status=2, notified_resolved=True)
@@ -93,6 +103,36 @@ async def test_mark_issue_resolved_drops_from_pending(store):
     assert await store.pending_issues() == []
     one = await store.get_tracked_issue(5)
     assert one.status == 2 and one.notified_resolved
+
+
+@pytest.mark.asyncio
+async def test_migration_adds_episode_columns_to_old_db(tmp_path):
+    import aiosqlite
+
+    path = str(tmp_path / "old.sqlite3")
+    # Simulate a DB created before problem_season/episode existed.
+    async with aiosqlite.connect(path) as db:
+        await db.execute(
+            """
+            CREATE TABLE tracked_issues (
+                issue_id INTEGER PRIMARY KEY, discord_id TEXT NOT NULL, media_type TEXT,
+                tmdb_id INTEGER, title TEXT, issue_type INTEGER, message TEXT, status INTEGER,
+                notified_resolved INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT
+            )
+            """
+        )
+        await db.commit()
+
+    s = LinkStore(path)
+    await s.connect()  # should ALTER in the new columns without error
+    try:
+        await s.add_tracked_issue(
+            1, "1", "tv", 1, "X", 1, "m", 1, problem_season=2, problem_episode=3
+        )
+        one = await s.get_tracked_issue(1)
+        assert one.problem_season == 2 and one.problem_episode == 3
+    finally:
+        await s.close()
 
 
 @pytest.mark.asyncio
