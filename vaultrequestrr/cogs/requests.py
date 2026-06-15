@@ -185,17 +185,18 @@ class RequestCog(commands.Cog):
                 seasons=_seasons_to_str(seasons),
             )
 
-        embed = _success_embed(result, seasons)
+        embeds = _success_embeds(result, seasons)
+        body = embeds[-1]  # the details embed sits below the poster banner
         if user_id is not None:
             try:
                 quota = await self.bot.seerr.get_quota(user_id)
                 line = format_quota_line(quota.movie if media_type == "movie" else quota.tv)
-                embed.add_field(name="Your remaining quota", value=line, inline=False)
+                body.add_field(name="Your remaining quota", value=line, inline=False)
             except SeerrError:
                 pass  # never fail a successful request just because quota lookup did
 
         # Replace the picker message in place with the confirmation.
-        await interaction.edit_original_response(content=None, embed=embed, view=None)
+        await interaction.edit_original_response(content=None, embeds=embeds, view=None)
 
 
 # ---------------------------------------------------------------------------
@@ -390,10 +391,13 @@ class ConfirmView(discord.ui.View):
         self._result = result
         self._seasons = seasons
 
-        # Nothing to request if it's already fully available — grey out the button.
+        # Nothing to request if it's already fully available or pending — grey out the button.
         if result.available:
             self.request.disabled = True
             self.request.label = "Already available"
+        elif result.requested:
+            self.request.disabled = True
+            self.request.label = "Already requested"
 
     @discord.ui.button(label="Request", style=discord.ButtonStyle.success)
     async def request(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
@@ -468,20 +472,30 @@ def _media_embed(result: SearchResult) -> discord.Embed:
     return embed
 
 
-def _success_embed(result: SearchResult, seasons: list[int] | str | None) -> discord.Embed:
+def _success_embeds(result: SearchResult, seasons: list[int] | str | None) -> list[discord.Embed]:
     title = result.title + (f" ({result.year})" if result.year else "")
-    embed = discord.Embed(
-        title="✅ Request submitted",
-        description=f"**{title}** has been requested.",
-        color=discord.Color.green(),
-    )
+    heading = "✅ Request submitted"
+    description = f"**{title}** has been requested."
+    color = discord.Color.green()
+
+    # Discord renders a full-width embed image at the bottom of its embed, so to
+    # get prominent artwork *above* the text we stack two embeds: a banner
+    # (heading + full-width poster) on top, then the details below it.
+    embeds: list[discord.Embed] = []
     if result.poster_url:
-        embed.set_thumbnail(url=result.poster_url)
+        banner = discord.Embed(title=heading, color=color)
+        banner.set_image(url=result.poster_url)
+        embeds.append(banner)
+        body = discord.Embed(description=description, color=color)
+    else:
+        body = discord.Embed(title=heading, description=description, color=color)
+
     if isinstance(seasons, list) and seasons:
-        embed.add_field(name="Seasons", value=", ".join(str(s) for s in seasons))
+        body.add_field(name="Seasons", value=", ".join(str(s) for s in seasons))
     elif seasons == "all":
-        embed.add_field(name="Seasons", value="All")
-    return embed
+        body.add_field(name="Seasons", value="All")
+    embeds.append(body)
+    return embeds
 
 
 def _status_emoji_text(status: int | None) -> tuple[str | None, str | None]:
