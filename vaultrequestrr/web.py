@@ -16,7 +16,14 @@ from aiohttp import web
 
 from .linking import LinkStatus
 from .logbuffer import get_records
-from .seerr import REQUEST_DECLINED, STATUS_AVAILABLE, SeerrError
+from .seerr import (
+    ISSUE_OPEN,
+    ISSUE_RESOLVED,
+    ISSUE_TYPE_LABELS,
+    REQUEST_DECLINED,
+    STATUS_AVAILABLE,
+    SeerrError,
+)
 
 _LEVELS = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40, "CRITICAL": 50}
 
@@ -43,6 +50,9 @@ class WebDashboard:
                 web.post("/links/unlink", self.unlink_action),
                 web.post("/links/remap", self.remap_action),
                 web.get("/activity", self.activity_page),
+                web.get("/issues", self.issues_page),
+                web.post("/issues/resolve", self.issue_resolve_action),
+                web.post("/issues/reopen", self.issue_reopen_action),
                 web.get("/logs", self.logs_page),
                 web.post("/settings", self.settings_action),
             ]
@@ -135,6 +145,7 @@ class WebDashboard:
             <label class="check"><input type="checkbox" name="require_linking" {_checked(rt.require_linking)}> Require Plex linking before first request</label>
             <label class="check"><input type="checkbox" name="notify_on_available" {_checked(rt.notify_on_available)}> DM users when media becomes available</label>
             <label class="check"><input type="checkbox" name="notify_on_declined" {_checked(rt.notify_on_declined)}> DM users when a request is declined</label>
+            <label class="check"><input type="checkbox" name="notify_on_issue_resolved" {_checked(rt.notify_on_issue_resolved)}> DM users when their reported issue is resolved</label>
             <label class="field">Log level
               <select name="log_level">{_log_options(rt.log_level)}</select>
             </label>
@@ -208,6 +219,63 @@ class WebDashboard:
         """
         return _html(_layout("Activity", body))
 
+    async def issues_page(self, request: web.Request) -> web.Response:
+        items = await self.bot.store.recent_issues(100)
+
+        # Overlay current status from Seerr so the page reflects resolutions that
+        # happened outside the bot (best-effort; fall back to the tracked status).
+        live: dict[int, int | None] = {}
+        try:
+            for issue in await self.bot.seerr.list_issues():
+                live[issue.id] = issue.status
+        except SeerrError as exc:
+            logger.debug("Could not load live issue statuses: %s", exc)
+
+        rows = ""
+        for it in items:
+            status = live.get(it.issue_id, it.status)
+            resolved = status == ISSUE_RESOLVED
+            badge = (
+                '<span class="badge ok">Resolved</span>'
+                if resolved
+                else '<span class="badge pend">Open</span>'
+            )
+            type_label = ISSUE_TYPE_LABELS.get(it.issue_type or 0, "—")
+            who = it.discord_id
+            link = await self.bot.store.get(it.discord_id)
+            if link is not None:
+                who = link.plex_username or link.email or it.discord_id
+            action = "reopen" if resolved else "resolve"
+            action_label = "Reopen" if resolved else "Resolve"
+            rows += f"""
+            <tr>
+              <td>{html.escape(it.title or '—')}</td>
+              <td>{html.escape(type_label)}</td>
+              <td>{html.escape(who)}</td>
+              <td>{badge}</td>
+              <td>{html.escape((it.created_at or '')[:19])}</td>
+              <td class="actions">
+                <form method="post" action="/issues/{action}">
+                  <input type="hidden" name="issue_id" value="{it.issue_id}">
+                  <button>{action_label}</button>
+                </form>
+              </td>
+            </tr>"""
+        if not items:
+            rows = '<tr><td colspan="6" class="muted">No issues reported yet.</td></tr>'
+
+        body = f"""
+        {_flash(request)}
+        <div class="card">
+          <h2>Reported issues ({len(items)})</h2>
+          <table>
+            <thead><tr><th>Title</th><th>Type</th><th>Reporter</th><th>Status</th><th>When</th><th>Actions</th></tr></thead>
+            <tbody>{rows}</tbody>
+          </table>
+        </div>
+        """
+        return _html(_layout("Issues", body))
+
     async def logs_page(self, request: web.Request) -> web.Response:
         level = request.query.get("level", "").upper()
         auto = request.query.get("auto") == "1"
@@ -280,12 +348,35 @@ class WebDashboard:
             raise web.HTTPFound("/links?msg=" + _q("No matching Seerr user found."))
         raise web.HTTPFound("/links?msg=" + _q("Seerr error during remap."))
 
+    async def issue_resolve_action(self, request: web.Request) -> web.Response:
+        await self._set_issue_status(request, resolved=True)
+
+    async def issue_reopen_action(self, request: web.Request) -> web.Response:
+        await self._set_issue_status(request, resolved=False)
+
+    async def _set_issue_status(self, request: web.Request, *, resolved: bool) -> None:
+        data = await request.post()
+        try:
+            issue_id = int(str(data.get("issue_id", "")))
+        except ValueError:
+            raise web.HTTPFound("/issues?msg=" + _q("Missing issue id."))
+        try:
+            await self.bot.seerr.update_issue_status(issue_id, resolved=resolved)
+        except SeerrError as exc:
+            raise web.HTTPFound("/issues?msg=" + _q(f"Seerr error: {exc}"))
+        await self.bot.store.mark_issue(
+            issue_id, status=ISSUE_RESOLVED if resolved else ISSUE_OPEN
+        )
+        verb = "resolved" if resolved else "reopened"
+        raise web.HTTPFound("/issues?msg=" + _q(f"Issue {verb}."))
+
     async def settings_action(self, request: web.Request) -> web.Response:
         data = await request.post()
         rt = self.bot.runtime
         rt.require_linking = "require_linking" in data
         rt.notify_on_available = "notify_on_available" in data
         rt.notify_on_declined = "notify_on_declined" in data
+        rt.notify_on_issue_resolved = "notify_on_issue_resolved" in data
         level = str(data.get("log_level", rt.log_level)).upper()
         if level in ("DEBUG", "INFO", "WARNING", "ERROR"):
             rt.log_level = level
@@ -308,7 +399,7 @@ def _layout(title: str, body: str, *, nav: bool = True) -> str:
         <nav class="nav">
           <a class="brand" href="/">VaultRequestrr</a>
           <div class="links">
-            <a href="/">Dashboard</a><a href="/links">Links</a><a href="/activity">Activity</a><a href="/logs">Logs</a>
+            <a href="/">Dashboard</a><a href="/links">Links</a><a href="/activity">Activity</a><a href="/issues">Issues</a><a href="/logs">Logs</a>
             <a href="/logout" class="muted">Sign out</a>
           </div>
         </nav>

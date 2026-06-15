@@ -34,18 +34,30 @@ Search results and the season picker show availability at a glance (✅ availabl
 🟡 partial, ⏳ processing, 🕒 requested), and the Request button greys out when
 the selected media/seasons are already present. Results beyond 25 paginate.
 
+### Reporting issues
+
+Users run `/issue <title>` to report a problem (Video / Audio / Subtitle /
+Other) with media **already on the server**. The bot searches movies and TV,
+limits results to in-library titles, applies the same link gate as requests, then
+collects a short description and files it to Seerr's issue tracker. Because
+Seerr's API attributes every API-key issue to the admin account, the real
+reporter is recorded in the issue message and tracked locally so the dashboard
+and resolution DMs know who filed it.
+
 ### Notifications
 
 The bot polls Seerr on a timer and **DMs the requester** when their request
-becomes available or is declined (configurable, `POLL_INTERVAL_SECONDS`). Only
-requests made through the bot are tracked.
+becomes available or is declined, and **DMs the reporter** when their issue is
+marked resolved (configurable, `POLL_INTERVAL_SECONDS`). Only requests and issues
+made through the bot are tracked.
 
 ### Admin dashboard
 
 If `WEB_PASSWORD` is set, a small web dashboard is served on `WEB_PORT` (default
 `5056`): health (Discord/Seerr status), linked accounts (with unlink/remap),
-recent request activity, live log viewer (level filter + auto-refresh), and
-live-toggleable settings. Sign in with the password.
+recent request activity, reported issues (with resolve/reopen actions), live log
+viewer (level filter + auto-refresh), and live-toggleable settings. Sign in with
+the password.
 
 Commands:
 
@@ -53,6 +65,7 @@ Commands:
 | --- | --- |
 | `/movie <title>` | Search for and request a movie |
 | `/tv <title>` | Search for and request a TV show (with season selection) |
+| `/issue <title>` | Report a Video/Audio/Subtitle/Other problem with media on the server |
 | `/quota` | Show your remaining request quota and when it resets |
 | `/linkstatus` | Show which Seerr account you're linked to |
 | `/unlink` | Remove your link (you'll be asked again on the next request) |
@@ -141,6 +154,7 @@ is the optional admin dashboard (`5056`), which is served only when you set a
 | `POLL_INTERVAL_SECONDS` | no | `120` | How often to poll Seerr for status changes (0 disables) |
 | `NOTIFY_ON_AVAILABLE` | no | `true` | DM requester when media becomes available |
 | `NOTIFY_ON_DECLINED` | no | `true` | DM requester when a request is declined |
+| `NOTIFY_ON_ISSUE_RESOLVED` | no | `true` | DM reporter when their issue is resolved |
 | `WEB_PASSWORD` | no | — | Set to enable the admin dashboard |
 | `WEB_PORT` | no | `5056` | Port the dashboard listens on |
 

@@ -39,9 +39,11 @@ class VaultRequestrr(commands.Bot):
             logger.warning("Could not verify Seerr connection: %s", exc)
 
         # Import here to avoid a circular import at module load.
+        from .cogs.issues import IssueCog
         from .cogs.requests import RequestCog
 
         await self.add_cog(RequestCog(self))
+        await self.add_cog(IssueCog(self))
 
         if self.config.discord_guild_id:
             guild = discord.Object(id=self.config.discord_guild_id)

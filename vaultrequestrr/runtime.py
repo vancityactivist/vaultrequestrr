@@ -15,6 +15,7 @@ class RuntimeSettings:
     require_linking: bool
     notify_on_available: bool
     notify_on_declined: bool
+    notify_on_issue_resolved: bool
     log_level: str
 
     @classmethod
@@ -23,5 +24,6 @@ class RuntimeSettings:
             require_linking=config.require_linking,
             notify_on_available=config.notify_on_available,
             notify_on_declined=config.notify_on_declined,
+            notify_on_issue_resolved=config.notify_on_issue_resolved,
             log_level=config.log_level,
         )

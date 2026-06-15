@@ -4,10 +4,14 @@ import pytest
 
 from vaultrequestrr.notifications import NotificationService
 from vaultrequestrr.seerr import (
+    ISSUE_OPEN,
+    ISSUE_RESOLVED,
+    ISSUE_VIDEO,
     REQUEST_DECLINED,
     REQUEST_PENDING,
     STATUS_AVAILABLE,
     STATUS_PROCESSING,
+    IssueInfo,
     QuotaStatus,
     RequestInfo,
     SeerrError,
@@ -40,14 +44,18 @@ class FakeUser:
 
 
 class FakeSeerr:
-    def __init__(self, info=None, exc=None):
+    def __init__(self, info=None, exc=None, issues=None):
         self.info = info
         self.exc = exc
+        self.issues = issues or []
 
     async def get_request(self, request_id):
         if self.exc:
             raise self.exc
         return self.info
+
+    async def list_issues(self, *, take=100):
+        return self.issues
 
     async def get_poster_url(self, media_type, tmdb_id):
         return f"https://image.tmdb.org/t/p/w500/{tmdb_id}.jpg"
@@ -58,13 +66,22 @@ class FakeSeerr:
 
 
 class FakeBot:
-    def __init__(self, store, seerr, *, notify_available=True, notify_declined=True):
+    def __init__(
+        self,
+        store,
+        seerr,
+        *,
+        notify_available=True,
+        notify_declined=True,
+        notify_issue_resolved=True,
+    ):
         self.store = store
         self.seerr = seerr
         self.config = SimpleNamespace(poll_interval_seconds=60)
         self.runtime = SimpleNamespace(
             notify_on_available=notify_available,
             notify_on_declined=notify_declined,
+            notify_on_issue_resolved=notify_issue_resolved,
         )
         self.sent = []
         self.embeds = []
@@ -136,6 +153,56 @@ async def test_finalises_without_dm_when_notifications_off(store):
 
     assert bot.sent == []  # no DM
     assert await store.pending_tracked() == []  # but still finalised so we stop polling
+
+
+def _issue(issue_id=5, status=ISSUE_RESOLVED):
+    return IssueInfo(
+        id=issue_id,
+        issue_type=ISSUE_VIDEO,
+        status=status,
+        media_type="movie",
+        tmdb_id=603,
+        created_by_name="Admin",
+        created_at="2026-06-15T00:00:00Z",
+    )
+
+
+@pytest.mark.asyncio
+async def test_notifies_when_issue_resolved(store):
+    await store.add_tracked_issue(5, "42", "movie", 603, "The Matrix", ISSUE_VIDEO, "no subs", ISSUE_OPEN)
+    bot = FakeBot(store, FakeSeerr(issues=[_issue(status=ISSUE_RESOLVED)]))
+    svc = NotificationService(bot)
+
+    await svc._poll()
+
+    assert bot.sent == [(42, "🛠️ Issue resolved")]
+    assert await store.pending_issues() == []  # finalised, no repeat DMs
+    one = await store.get_tracked_issue(5)
+    assert one.status == ISSUE_RESOLVED and one.notified_resolved
+
+
+@pytest.mark.asyncio
+async def test_open_issue_stays_pending(store):
+    await store.add_tracked_issue(5, "42", "movie", 603, "X", ISSUE_VIDEO, "m", ISSUE_OPEN)
+    bot = FakeBot(store, FakeSeerr(issues=[_issue(status=ISSUE_OPEN)]))
+    svc = NotificationService(bot)
+
+    await svc._poll()
+
+    assert bot.sent == []
+    assert len(await store.pending_issues()) == 1
+
+
+@pytest.mark.asyncio
+async def test_resolved_issue_finalised_without_dm_when_off(store):
+    await store.add_tracked_issue(5, "42", "movie", 603, "X", ISSUE_VIDEO, "m", ISSUE_OPEN)
+    bot = FakeBot(store, FakeSeerr(issues=[_issue()]), notify_issue_resolved=False)
+    svc = NotificationService(bot)
+
+    await svc._poll()
+
+    assert bot.sent == []
+    assert await store.pending_issues() == []  # still finalised
 
 
 @pytest.mark.asyncio

@@ -33,6 +33,7 @@ class Config:
     poll_interval_seconds: int
     notify_on_available: bool
     notify_on_declined: bool
+    notify_on_issue_resolved: bool
     # Web dashboard
     web_port: int
     web_password: str
@@ -69,6 +70,9 @@ class Config:
             poll_interval_seconds=_optional_int(os.getenv("POLL_INTERVAL_SECONDS")) or 120,
             notify_on_available=_bool(os.getenv("NOTIFY_ON_AVAILABLE"), default=True),
             notify_on_declined=_bool(os.getenv("NOTIFY_ON_DECLINED"), default=True),
+            notify_on_issue_resolved=_bool(
+                os.getenv("NOTIFY_ON_ISSUE_RESOLVED"), default=True
+            ),
             web_port=_optional_int(os.getenv("WEB_PORT")) or 5056,
             web_password=os.getenv("WEB_PASSWORD", "").strip(),
         )

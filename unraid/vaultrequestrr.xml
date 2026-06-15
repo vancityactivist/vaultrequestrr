@@ -33,5 +33,6 @@
   <Config Name="Dashboard Port" Target="5056" Default="5056" Mode="tcp" Description="Host port for the admin dashboard. Only used when a Dashboard Password is set." Type="Port" Display="always" Required="false" Mask="false">5056</Config>
   <Config Name="Notify When Available" Target="NOTIFY_ON_AVAILABLE" Default="true" Mode="" Description="DM the requester when their movie/season becomes available." Type="Variable" Display="advanced" Required="false" Mask="false">true</Config>
   <Config Name="Notify When Declined" Target="NOTIFY_ON_DECLINED" Default="true" Mode="" Description="DM the requester when an admin declines their request." Type="Variable" Display="advanced" Required="false" Mask="false">true</Config>
+  <Config Name="Notify When Issue Resolved" Target="NOTIFY_ON_ISSUE_RESOLVED" Default="true" Mode="" Description="DM the reporter when their reported issue is marked resolved." Type="Variable" Display="advanced" Required="false" Mask="false">true</Config>
   <Config Name="Poll Interval (seconds)" Target="POLL_INTERVAL_SECONDS" Default="120" Mode="" Description="How often to poll Seerr for request status changes (0 disables notifications)." Type="Variable" Display="advanced" Required="false" Mask="false">120</Config>
 </Container>

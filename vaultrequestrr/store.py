@@ -30,6 +30,20 @@ CREATE TABLE IF NOT EXISTS tracked_requests (
     created_at          TEXT NOT NULL,
     updated_at          TEXT
 );
+
+CREATE TABLE IF NOT EXISTS tracked_issues (
+    issue_id            INTEGER PRIMARY KEY,
+    discord_id          TEXT NOT NULL,
+    media_type          TEXT,
+    tmdb_id             INTEGER,
+    title               TEXT,
+    issue_type          INTEGER,
+    message             TEXT,
+    status              INTEGER,
+    notified_resolved   INTEGER NOT NULL DEFAULT 0,
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT
+);
 """
 
 
@@ -54,6 +68,21 @@ class TrackedRequest:
     media_status: int | None
     notified_available: bool
     notified_declined: bool
+    created_at: str
+    updated_at: str | None
+
+
+@dataclass(frozen=True)
+class TrackedIssue:
+    issue_id: int
+    discord_id: str
+    media_type: str | None
+    tmdb_id: int | None
+    title: str | None
+    issue_type: int | None
+    message: str | None
+    status: int | None
+    notified_resolved: bool
     created_at: str
     updated_at: str | None
 
@@ -205,6 +234,90 @@ class LinkStore:
         )
         await self._conn.commit()
 
+    # -- tracked issues (resolution notifications + dashboard) -------------
+
+    async def add_tracked_issue(
+        self,
+        issue_id: int,
+        discord_id: str,
+        media_type: str | None,
+        tmdb_id: int | None,
+        title: str | None,
+        issue_type: int | None,
+        message: str | None,
+        status: int | None,
+    ) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        await self._conn.execute(
+            """
+            INSERT INTO tracked_issues
+                (issue_id, discord_id, media_type, tmdb_id, title, issue_type,
+                 message, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(issue_id) DO UPDATE SET
+                discord_id = excluded.discord_id,
+                title = excluded.title,
+                issue_type = excluded.issue_type,
+                message = excluded.message,
+                status = excluded.status
+            """,
+            (issue_id, discord_id, media_type, tmdb_id, title, issue_type,
+             message, status, now, now),
+        )
+        await self._conn.commit()
+
+    async def pending_issues(self) -> list[TrackedIssue]:
+        async with self._conn.execute(
+            """
+            SELECT * FROM tracked_issues
+            WHERE notified_resolved = 0
+            ORDER BY created_at ASC
+            """
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [_row_to_tracked_issue(row) for row in rows]
+
+    async def recent_issues(self, limit: int = 100) -> list[TrackedIssue]:
+        async with self._conn.execute(
+            "SELECT * FROM tracked_issues ORDER BY created_at DESC LIMIT ?", (limit,)
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [_row_to_tracked_issue(row) for row in rows]
+
+    async def get_tracked_issue(self, issue_id: int) -> TrackedIssue | None:
+        async with self._conn.execute(
+            "SELECT * FROM tracked_issues WHERE issue_id = ?", (issue_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+        return _row_to_tracked_issue(row) if row else None
+
+    async def mark_issue(
+        self,
+        issue_id: int,
+        *,
+        status: int | None = None,
+        notified_resolved: bool | None = None,
+    ) -> None:
+        sets = ["updated_at = ?"]
+        params: list[object] = [datetime.now(timezone.utc).isoformat()]
+        if status is not None:
+            sets.append("status = ?")
+            params.append(status)
+        if notified_resolved is not None:
+            sets.append("notified_resolved = ?")
+            params.append(1 if notified_resolved else 0)
+        params.append(issue_id)
+        await self._conn.execute(
+            f"UPDATE tracked_issues SET {', '.join(sets)} WHERE issue_id = ?", params
+        )
+        await self._conn.commit()
+
+    async def remove_issue(self, issue_id: int) -> None:
+        await self._conn.execute(
+            "DELETE FROM tracked_issues WHERE issue_id = ?", (issue_id,)
+        )
+        await self._conn.commit()
+
 
 def _row_to_tracked(row: aiosqlite.Row) -> TrackedRequest:
     return TrackedRequest(
@@ -218,6 +331,22 @@ def _row_to_tracked(row: aiosqlite.Row) -> TrackedRequest:
         media_status=row["media_status"],
         notified_available=bool(row["notified_available"]),
         notified_declined=bool(row["notified_declined"]),
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def _row_to_tracked_issue(row: aiosqlite.Row) -> TrackedIssue:
+    return TrackedIssue(
+        issue_id=row["issue_id"],
+        discord_id=row["discord_id"],
+        media_type=row["media_type"],
+        tmdb_id=row["tmdb_id"],
+        title=row["title"],
+        issue_type=row["issue_type"],
+        message=row["message"],
+        status=row["status"],
+        notified_resolved=bool(row["notified_resolved"]),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )

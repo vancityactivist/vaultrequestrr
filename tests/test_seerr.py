@@ -3,7 +3,13 @@ import json
 import httpx
 import pytest
 
-from vaultrequestrr.seerr import SeerrClient, SeerrError, SeerrUser
+from vaultrequestrr.seerr import (
+    ISSUE_RESOLVED,
+    ISSUE_VIDEO,
+    SeerrClient,
+    SeerrError,
+    SeerrUser,
+)
 
 
 USERS_PAYLOAD = {
@@ -310,6 +316,108 @@ async def test_quota_reset_uses_oldest_in_window_request():
     # reset = oldest in-window (3 days ago) + 7-day window => ~4 days from now
     delta_days = (quota.movie.reset_at - now).total_seconds() / 86400
     assert 3.9 < delta_days < 4.1
+
+
+# -- search captures the internal media id ---------------------------------
+
+
+@pytest.mark.asyncio
+async def test_search_captures_media_id_for_in_library_items():
+    payload = {
+        "page": 1,
+        "totalPages": 1,
+        "results": [
+            {"id": 1, "mediaType": "movie", "title": "In library", "mediaInfo": {"id": 42, "status": 5}},
+            {"id": 2, "mediaType": "movie", "title": "Not added"},
+        ],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    client = make_client(handler)
+    try:
+        results = await client.search("x", "movie")
+    finally:
+        await client.aclose()
+
+    by_id = {r.tmdb_id: r for r in results}
+    assert by_id[1].media_id == 42 and by_id[1].in_library
+    assert by_id[2].media_id is None and not by_id[2].in_library
+
+
+# -- issues ----------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_issue_body():
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/issue"
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(201, json={"id": 5})
+
+    client = make_client(handler)
+    try:
+        created = await client.create_issue(42, ISSUE_VIDEO, "no subs")
+    finally:
+        await client.aclose()
+
+    assert created == {"id": 5}
+    assert captured["body"] == {"issueType": ISSUE_VIDEO, "message": "no subs", "mediaId": 42}
+
+
+@pytest.mark.asyncio
+async def test_list_issues_parses_results():
+    payload = {
+        "results": [
+            {
+                "id": 5,
+                "issueType": 1,
+                "status": 2,
+                "createdAt": "2026-06-15T00:00:00Z",
+                "media": {"mediaType": "movie", "tmdbId": 603},
+                "createdBy": {"displayName": "Admin"},
+            }
+        ]
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/issue"
+        # Must request all issues — Seerr defaults to open-only, hiding resolutions.
+        assert request.url.params["filter"] == "all"
+        return httpx.Response(200, json=payload)
+
+    client = make_client(handler)
+    try:
+        issues = await client.list_issues()
+    finally:
+        await client.aclose()
+
+    assert len(issues) == 1
+    issue = issues[0]
+    assert issue.id == 5 and issue.status == ISSUE_RESOLVED
+    assert issue.tmdb_id == 603 and issue.media_type == "movie"
+    assert issue.created_by_name == "Admin"
+
+
+@pytest.mark.asyncio
+async def test_update_issue_status_paths():
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        return httpx.Response(200, json={})
+
+    client = make_client(handler)
+    try:
+        await client.update_issue_status(5, resolved=True)
+        await client.update_issue_status(5, resolved=False)
+    finally:
+        await client.aclose()
+
+    assert seen == ["/api/v1/issue/5/resolved", "/api/v1/issue/5/open"]
 
 
 @pytest.mark.asyncio

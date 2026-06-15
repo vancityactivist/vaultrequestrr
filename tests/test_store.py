@@ -48,6 +48,41 @@ async def test_remove(store):
     assert await store.get("123") is None
 
 
+# -- tracked issues --------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tracked_issue_roundtrip_and_pending(store):
+    await store.add_tracked_issue(
+        issue_id=5,
+        discord_id="123",
+        media_type="movie",
+        tmdb_id=603,
+        title="The Matrix",
+        issue_type=1,
+        message="no subs",
+        status=1,
+    )
+
+    pending = await store.pending_issues()
+    assert [i.issue_id for i in pending] == [5]
+    recent = await store.recent_issues()
+    assert recent[0].title == "The Matrix" and recent[0].message == "no subs"
+
+    one = await store.get_tracked_issue(5)
+    assert one is not None and one.discord_id == "123" and not one.notified_resolved
+
+
+@pytest.mark.asyncio
+async def test_mark_issue_resolved_drops_from_pending(store):
+    await store.add_tracked_issue(5, "123", "movie", 603, "X", 1, "m", 1)
+    await store.mark_issue(5, status=2, notified_resolved=True)
+
+    assert await store.pending_issues() == []
+    one = await store.get_tracked_issue(5)
+    assert one.status == 2 and one.notified_resolved
+
+
 @pytest.mark.asyncio
 async def test_persists_across_reconnect(tmp_path):
     path = str(tmp_path / "links.sqlite3")

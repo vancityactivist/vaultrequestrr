@@ -9,8 +9,17 @@ from vaultrequestrr.web import WebDashboard
 
 
 class FakeSeerr:
+    def __init__(self):
+        self.status_updates = []
+
     async def test_connection(self):
         return None
+
+    async def list_issues(self, *, take=100):
+        return []
+
+    async def update_issue_status(self, issue_id, *, resolved):
+        self.status_updates.append((issue_id, resolved))
 
 
 class FakeBot:
@@ -20,7 +29,11 @@ class FakeBot:
         self.linker = AccountLinker(self.seerr, store)
         self.config = SimpleNamespace(web_password="secret", web_port=5056)
         self.runtime = SimpleNamespace(
-            require_linking=True, notify_on_available=True, notify_on_declined=True, log_level="INFO"
+            require_linking=True,
+            notify_on_available=True,
+            notify_on_declined=True,
+            notify_on_issue_resolved=True,
+            log_level="INFO",
         )
 
     def is_ready(self):
@@ -93,6 +106,26 @@ async def test_settings_toggle_updates_runtime(client):
     assert rt.require_linking is False  # unchecked => off
     assert rt.notify_on_declined is False
     assert rt.log_level == "DEBUG"
+
+
+@pytest.mark.asyncio
+async def test_issues_page_lists_and_resolves(client):
+    cli, store, dash = client
+    await store.save("42", 7, "neo", "neo@example.com")
+    await store.add_tracked_issue(5, "42", "movie", 603, "The Matrix", 1, "no subs", 1)
+    await cli.post("/login", data={"password": "secret"})
+
+    page = await cli.get("/issues")
+    body = await page.text()
+    assert "The Matrix" in body and "neo" in body and "Video" in body and "Resolve" in body
+
+    resp = await cli.post(
+        "/issues/resolve", data={"issue_id": "5"}, allow_redirects=False
+    )
+    assert resp.status == 302 and resp.headers["Location"].startswith("/issues")
+    assert dash.bot.seerr.status_updates == [(5, True)]
+    one = await store.get_tracked_issue(5)
+    assert one.status == 2  # ISSUE_RESOLVED
 
 
 @pytest.mark.asyncio

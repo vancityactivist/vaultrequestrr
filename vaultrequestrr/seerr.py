@@ -28,6 +28,21 @@ REQUEST_PENDING = 1
 REQUEST_APPROVED = 2
 REQUEST_DECLINED = 3
 
+# Seerr issue type codes (issue.issueType) and status codes (issue.status).
+ISSUE_VIDEO = 1
+ISSUE_AUDIO = 2
+ISSUE_SUBTITLE = 3
+ISSUE_OTHER = 4
+ISSUE_OPEN = 1
+ISSUE_RESOLVED = 2
+
+ISSUE_TYPE_LABELS = {
+    ISSUE_VIDEO: "Video",
+    ISSUE_AUDIO: "Audio",
+    ISSUE_SUBTITLE: "Subtitle",
+    ISSUE_OTHER: "Other",
+}
+
 MediaType = str  # "movie" or "tv"
 
 
@@ -44,6 +59,12 @@ class SearchResult:
     overview: str | None
     poster_url: str | None
     status: int | None
+    media_id: int | None = None  # internal Seerr media DB id (mediaInfo.id), if in library
+
+    @property
+    def in_library(self) -> bool:
+        """True when Seerr already tracks this media (required to file an issue)."""
+        return self.media_id is not None
 
     @property
     def available(self) -> bool:
@@ -131,6 +152,17 @@ class RequestInfo:
     media_status: int | None  # STATUS_* code
     media_type: str | None
     tmdb_id: int | None
+
+
+@dataclass(frozen=True)
+class IssueInfo:
+    id: int
+    issue_type: int | None  # ISSUE_* type code
+    status: int | None  # ISSUE_OPEN / ISSUE_RESOLVED
+    media_type: str | None
+    tmdb_id: int | None
+    created_by_name: str | None
+    created_at: str | None
 
 
 class SeerrClient:
@@ -410,6 +442,34 @@ class SeerrClient:
             tmdb_id=media.get("tmdbId"),
         )
 
+    # -- issues ------------------------------------------------------------
+
+    async def create_issue(
+        self, media_id: int, issue_type: int, message: str
+    ) -> dict[str, Any]:
+        """Report an issue against an in-library media item.
+
+        `media_id` is the internal Seerr media DB id (mediaInfo.id), not a tmdbId.
+        The issue is attributed to the API key's owner; the reporter is recorded
+        in the message text by the caller.
+        """
+        return await self._post(
+            "issue",
+            {"issueType": issue_type, "message": message, "mediaId": media_id},
+        )
+
+    async def list_issues(self, *, take: int = 100) -> list[IssueInfo]:
+        # `filter=all` is required — Seerr defaults to open issues only, which
+        # would hide the resolved transitions the notifier and dashboard need.
+        data = await self._get(
+            "issue", params={"take": take, "skip": 0, "sort": "modified", "filter": "all"}
+        )
+        return [_to_issue_info(raw) for raw in data.get("results", [])]
+
+    async def update_issue_status(self, issue_id: int, *, resolved: bool) -> None:
+        """Resolve or reopen an issue."""
+        await self._post(f"issue/{issue_id}/{'resolved' if resolved else 'open'}", None)
+
 
 # -- module-level parsing helpers -----------------------------------------
 
@@ -427,6 +487,21 @@ def _to_search_result(raw: dict[str, Any]) -> SearchResult:
         overview=raw.get("overview") or None,
         poster_url=f"https://image.tmdb.org/t/p/w500{poster}" if poster else None,
         status=media_info.get("status"),
+        media_id=media_info.get("id"),
+    )
+
+
+def _to_issue_info(raw: dict[str, Any]) -> IssueInfo:
+    media = raw.get("media") or {}
+    created_by = raw.get("createdBy") or {}
+    return IssueInfo(
+        id=raw.get("id"),
+        issue_type=raw.get("issueType"),
+        status=raw.get("status"),
+        media_type=media.get("mediaType"),
+        tmdb_id=media.get("tmdbId"),
+        created_by_name=created_by.get("displayName") or created_by.get("username"),
+        created_at=raw.get("createdAt"),
     )
 
 

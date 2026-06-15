@@ -13,13 +13,15 @@ import discord
 from discord.ext import tasks
 
 from .seerr import (
+    ISSUE_RESOLVED,
+    ISSUE_TYPE_LABELS,
     REQUEST_DECLINED,
     STATUS_AVAILABLE,
     STATUS_PARTIALLY_AVAILABLE,
     SeerrError,
     format_quota_line,
 )
-from .store import TrackedRequest
+from .store import TrackedIssue, TrackedRequest
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +55,11 @@ class NotificationService:
                 await self._check_one(tracked)
             except Exception:  # noqa: BLE001
                 logger.exception("Error checking tracked request %s", tracked.request_id)
+
+        try:
+            await self._poll_issues()
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to poll tracked issues")
 
     async def _check_one(self, tracked: TrackedRequest) -> None:
         runtime = self.bot.runtime
@@ -95,6 +102,78 @@ class NotificationService:
             request_status=info.request_status,
             media_status=info.media_status,
         )
+
+    # -- issues ------------------------------------------------------------
+
+    async def _poll_issues(self) -> None:
+        pending = await self.bot.store.pending_issues()
+        if not pending:
+            return
+
+        try:
+            live = await self.bot.seerr.list_issues()
+        except SeerrError as exc:
+            logger.debug("Could not refresh issues: %s", exc)
+            return
+        status_by_id = {issue.id: issue.status for issue in live}
+
+        runtime = self.bot.runtime
+        for tracked in pending:
+            status = status_by_id.get(tracked.issue_id)
+            if status is None or status != ISSUE_RESOLVED:
+                # Unknown (not in the page / deleted) or still open: keep status fresh.
+                if status is not None and status != tracked.status:
+                    await self.bot.store.mark_issue(tracked.issue_id, status=status)
+                continue
+
+            if runtime.notify_on_issue_resolved:
+                await self._dm_issue_resolved(tracked)
+            await self.bot.store.mark_issue(
+                tracked.issue_id, status=ISSUE_RESOLVED, notified_resolved=True
+            )
+
+    async def _dm_issue_resolved(self, tracked: TrackedIssue) -> None:
+        try:
+            user = await self.bot.fetch_user(int(tracked.discord_id))
+        except (discord.NotFound, discord.HTTPException, ValueError) as exc:
+            logger.warning("Could not resolve Discord user %s: %s", tracked.discord_id, exc)
+            return
+
+        title = tracked.title or "your reported title"
+        label = ISSUE_TYPE_LABELS.get(tracked.issue_type or 0, "issue")
+        heading = "🛠️ Issue resolved"
+        description = (
+            f"The **{label}** issue you reported for **{title}** has been marked resolved. "
+            "If it's still happening, run `/issue` to report it again."
+        )
+        color = discord.Color.green()
+
+        poster_url = None
+        if tracked.tmdb_id is not None and tracked.media_type:
+            try:
+                poster_url = await self.bot.seerr.get_poster_url(
+                    tracked.media_type, tracked.tmdb_id
+                )
+            except SeerrError:
+                poster_url = None
+
+        embeds: list[discord.Embed] = []
+        if poster_url:
+            banner = discord.Embed(title=heading, color=color)
+            banner.set_image(url=poster_url)
+            embeds.append(banner)
+            body = discord.Embed(description=description, color=color)
+        else:
+            body = discord.Embed(title=heading, description=description, color=color)
+        body.set_footer(text="VaultRequestrr")
+        embeds.append(body)
+
+        try:
+            await user.send(embeds=embeds)
+        except discord.Forbidden:
+            logger.info("User %s has DMs disabled; skipping notification", tracked.discord_id)
+        except discord.HTTPException as exc:
+            logger.warning("Failed to DM user %s: %s", tracked.discord_id, exc)
 
     async def _dm(self, tracked: TrackedRequest, *, available: bool) -> None:
         try:
