@@ -31,6 +31,11 @@ CREATE TABLE IF NOT EXISTS tracked_requests (
     updated_at          TEXT
 );
 
+CREATE TABLE IF NOT EXISTS app_settings (
+    key    TEXT PRIMARY KEY,
+    value  TEXT
+);
+
 CREATE TABLE IF NOT EXISTS tracked_issues (
     issue_id            INTEGER PRIMARY KEY,
     discord_id          TEXT NOT NULL,
@@ -231,6 +236,25 @@ class LinkStore:
     async def remove_tracked(self, request_id: int) -> None:
         await self._conn.execute(
             "DELETE FROM tracked_requests WHERE request_id = ?", (request_id,)
+        )
+        await self._conn.commit()
+
+    # -- app settings (web-editable overrides, persisted across restarts) --
+
+    async def get_setting(self, key: str) -> str | None:
+        async with self._conn.execute(
+            "SELECT value FROM app_settings WHERE key = ?", (key,)
+        ) as cursor:
+            row = await cursor.fetchone()
+        return row["value"] if row else None
+
+    async def set_setting(self, key: str, value: str) -> None:
+        await self._conn.execute(
+            """
+            INSERT INTO app_settings (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (key, value),
         )
         await self._conn.commit()
 

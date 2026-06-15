@@ -23,18 +23,43 @@ class VaultRequestrr(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
         self.config = config
         self.runtime = RuntimeSettings.from_config(config)
+        self._seerr_url = config.seerr_url
         self.seerr = SeerrClient(config.seerr_url, config.seerr_api_key)
         self.store = LinkStore(config.database_path)
         self.linker = AccountLinker(self.seerr, self.store)
         self.notifications = NotificationService(self)
         self.web = WebDashboard(self)
 
+    @property
+    def seerr_url(self) -> str:
+        """The Seerr base URL the live client is currently using."""
+        return self._seerr_url
+
+    async def apply_seerr_connection(self, url: str, api_key: str) -> None:
+        """Swap the live Seerr client (and the linker that holds it) to new creds."""
+        old = self.seerr
+        self._seerr_url = url
+        self.seerr = SeerrClient(url, api_key)
+        self.linker = AccountLinker(self.seerr, self.store)
+        try:
+            await old.aclose()
+        except Exception:  # noqa: BLE001 - best effort closing the old client
+            logger.debug("Failed to close previous Seerr client", exc_info=True)
+
     async def setup_hook(self) -> None:
         await self.store.connect()
 
+        # Persisted web-edited connection overrides env (env is the first-run default).
+        url = await self.store.get_setting("seerr_url")
+        key = await self.store.get_setting("seerr_api_key")
+        if url or key:
+            await self.apply_seerr_connection(
+                url or self.config.seerr_url, key or self.config.seerr_api_key
+            )
+
         try:
             await self.seerr.test_connection()
-            logger.info("Connected to Seerr at %s", self.config.seerr_url)
+            logger.info("Connected to Seerr at %s", self.seerr_url)
         except SeerrError as exc:
             logger.warning("Could not verify Seerr connection: %s", exc)
 

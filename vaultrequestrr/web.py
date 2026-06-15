@@ -14,6 +14,7 @@ from datetime import datetime
 
 from aiohttp import web
 
+from .arr import ArrError, research_media
 from .linking import LinkStatus
 from .logbuffer import get_records
 from .seerr import (
@@ -22,6 +23,7 @@ from .seerr import (
     ISSUE_TYPE_LABELS,
     REQUEST_DECLINED,
     STATUS_AVAILABLE,
+    SeerrClient,
     SeerrError,
 )
 
@@ -53,8 +55,11 @@ class WebDashboard:
                 web.get("/issues", self.issues_page),
                 web.post("/issues/resolve", self.issue_resolve_action),
                 web.post("/issues/reopen", self.issue_reopen_action),
+                web.post("/issues/research", self.issue_research_action),
                 web.get("/logs", self.logs_page),
+                web.get("/settings", self.settings_page),
                 web.post("/settings", self.settings_action),
+                web.post("/settings/connection", self.connection_action),
             ]
         )
         return app
@@ -127,7 +132,6 @@ class WebDashboard:
 
         links = await self.bot.store.list_links()
         pending = await self.bot.store.pending_tracked()
-        rt = self.bot.runtime
         msg = _flash(request)
 
         body = f"""
@@ -138,21 +142,8 @@ class WebDashboard:
           <div class="card stat"><div class="num">{_dot(discord_ok)} Discord</div><div class="muted">{'Ready' if discord_ok else 'Connecting…'}</div></div>
           <div class="card stat"><div class="num">{_dot(seerr_ok)} Seerr</div><div class="muted">{html.escape(seerr_msg)}</div></div>
         </div>
-
-        <div class="card">
-          <h2>Runtime settings</h2>
-          <form method="post" action="/settings">
-            <label class="check"><input type="checkbox" name="require_linking" {_checked(rt.require_linking)}> Require Plex linking before first request</label>
-            <label class="check"><input type="checkbox" name="notify_on_available" {_checked(rt.notify_on_available)}> DM users when media becomes available</label>
-            <label class="check"><input type="checkbox" name="notify_on_declined" {_checked(rt.notify_on_declined)}> DM users when a request is declined</label>
-            <label class="check"><input type="checkbox" name="notify_on_issue_resolved" {_checked(rt.notify_on_issue_resolved)}> DM users when their reported issue is resolved</label>
-            <label class="field">Log level
-              <select name="log_level">{_log_options(rt.log_level)}</select>
-            </label>
-            <button type="submit">Save settings</button>
-          </form>
-          <p class="muted small">These apply immediately but reset to env defaults on restart.</p>
-        </div>
+        <p class="muted small">Manage the Seerr connection and bot behaviour on the
+          <a href="/settings">Settings</a> page.</p>
         """
         return _html(_layout("Dashboard", body))
 
@@ -259,6 +250,10 @@ class WebDashboard:
                   <input type="hidden" name="issue_id" value="{it.issue_id}">
                   <button>{action_label}</button>
                 </form>
+                <form method="post" action="/issues/research" onsubmit="return confirm('Blocklist the last download and search for a new release?')">
+                  <input type="hidden" name="issue_id" value="{it.issue_id}">
+                  <button class="warn">Re-search</button>
+                </form>
               </td>
             </tr>"""
         if not items:
@@ -325,6 +320,88 @@ class WebDashboard:
         """
         return _html(_layout("Logs", body))
 
+    async def settings_page(self, request: web.Request) -> web.Response:
+        rt = self.bot.runtime
+        seerr_url = await self.bot.store.get_setting("seerr_url") or self.bot.config.seerr_url
+        key_set = bool(
+            await self.bot.store.get_setting("seerr_api_key") or self.bot.config.seerr_api_key
+        )
+        key_placeholder = "•••••••• (unchanged — leave blank to keep)" if key_set else "Seerr API key"
+
+        # Read-only view of the download managers Seerr already knows about.
+        arr_rows = ""
+        try:
+            instances = []
+            for kind in ("radarr", "sonarr"):
+                instances.extend(await self.bot.seerr.list_service_instances(kind))
+            for inst in instances:
+                tags = []
+                if inst.is_default:
+                    tags.append('<span class="badge ok">default</span>')
+                if inst.is_4k:
+                    tags.append('<span class="badge pend">4K</span>')
+                arr_rows += f"""
+                <tr>
+                  <td>{html.escape((inst.kind or '').title())}</td>
+                  <td>{html.escape(inst.name or '—')}</td>
+                  <td><code>{html.escape(inst.url)}</code></td>
+                  <td>{html.escape(inst.profile or '—')}</td>
+                  <td>{' '.join(tags)}</td>
+                </tr>"""
+            arr_note = (
+                '<tr><td colspan="5" class="muted">Seerr has no Radarr/Sonarr configured.</td></tr>'
+                if not arr_rows
+                else ""
+            )
+        except SeerrError as exc:
+            arr_rows = ""
+            arr_note = f'<tr><td colspan="5" class="muted">Couldn\'t reach Seerr: {html.escape(str(exc))}</td></tr>'
+
+        body = f"""
+        {_flash(request)}
+        <div class="card">
+          <h2>Seerr connection</h2>
+          <form method="post" action="/settings/connection">
+            <label class="field">Seerr URL
+              <input type="text" name="seerr_url" value="{html.escape(seerr_url)}" placeholder="http://host:5055" required>
+            </label>
+            <label class="field">API key
+              <input type="password" name="seerr_api_key" placeholder="{html.escape(key_placeholder)}" autocomplete="off">
+            </label>
+            <button type="submit">Test &amp; save</button>
+          </form>
+          <p class="muted small">The connection is validated before saving, then applied
+            immediately. Stored in the database and kept across restarts (environment
+            variables are only the first-run default).</p>
+        </div>
+
+        <div class="card">
+          <h2>Bot settings</h2>
+          <form method="post" action="/settings">
+            <label class="check"><input type="checkbox" name="require_linking" {_checked(rt.require_linking)}> Require Plex linking before first request</label>
+            <label class="check"><input type="checkbox" name="notify_on_available" {_checked(rt.notify_on_available)}> DM users when media becomes available</label>
+            <label class="check"><input type="checkbox" name="notify_on_declined" {_checked(rt.notify_on_declined)}> DM users when a request is declined</label>
+            <label class="check"><input type="checkbox" name="notify_on_issue_resolved" {_checked(rt.notify_on_issue_resolved)}> DM users when their reported issue is resolved</label>
+            <label class="field">Log level
+              <select name="log_level">{_log_options(rt.log_level)}</select>
+            </label>
+            <button type="submit">Save settings</button>
+          </form>
+          <p class="muted small">These apply immediately but reset to env defaults on restart.</p>
+        </div>
+
+        <div class="card">
+          <h2>Download managers <span class="muted small">(from Seerr — read only)</span></h2>
+          <table>
+            <thead><tr><th>Service</th><th>Name</th><th>URL</th><th>Profile</th><th></th></tr></thead>
+            <tbody>{arr_rows}{arr_note}</tbody>
+          </table>
+          <p class="muted small">Radarr/Sonarr are configured in Seerr; VaultRequestrr reads
+            them from there for the issue <strong>Re-search</strong> action.</p>
+        </div>
+        """
+        return _html(_layout("Settings", body))
+
     # -- actions -----------------------------------------------------------
 
     async def unlink_action(self, request: web.Request) -> web.Response:
@@ -370,6 +447,52 @@ class WebDashboard:
         verb = "resolved" if resolved else "reopened"
         raise web.HTTPFound("/issues?msg=" + _q(f"Issue {verb}."))
 
+    async def issue_research_action(self, request: web.Request) -> web.Response:
+        data = await request.post()
+        try:
+            issue_id = int(str(data.get("issue_id", "")))
+        except ValueError:
+            raise web.HTTPFound("/issues?msg=" + _q("Missing issue id."))
+        tracked = await self.bot.store.get_tracked_issue(issue_id)
+        if tracked is None or tracked.tmdb_id is None or not tracked.media_type:
+            raise web.HTTPFound("/issues?msg=" + _q("Can't re-search this issue."))
+        try:
+            result = await research_media(
+                self.bot.seerr, tracked.media_type, tracked.tmdb_id
+            )
+        except ArrError as exc:
+            raise web.HTTPFound("/issues?msg=" + _q(str(exc)))
+        raise web.HTTPFound("/issues?msg=" + _q(result))
+
+    async def connection_action(self, request: web.Request) -> web.Response:
+        data = await request.post()
+        url = str(data.get("seerr_url", "")).strip().rstrip("/")
+        new_key = str(data.get("seerr_api_key", "")).strip()
+        if not url:
+            raise web.HTTPFound("/settings?msg=" + _q("Seerr URL is required."))
+
+        # Blank key field => keep the current effective key.
+        effective_key = (
+            new_key
+            or await self.bot.store.get_setting("seerr_api_key")
+            or self.bot.config.seerr_api_key
+        )
+
+        # Validate before persisting — don't break a working connection on a typo.
+        probe = SeerrClient(url, effective_key)
+        try:
+            await probe.test_connection()
+        except SeerrError as exc:
+            raise web.HTTPFound("/settings?msg=" + _q(f"Couldn't connect: {exc}"))
+        finally:
+            await probe.aclose()
+
+        await self.bot.store.set_setting("seerr_url", url)
+        if new_key:
+            await self.bot.store.set_setting("seerr_api_key", new_key)
+        await self.bot.apply_seerr_connection(url, effective_key)
+        raise web.HTTPFound("/settings?msg=" + _q("Seerr connection saved."))
+
     async def settings_action(self, request: web.Request) -> web.Response:
         data = await request.post()
         rt = self.bot.runtime
@@ -381,7 +504,7 @@ class WebDashboard:
         if level in ("DEBUG", "INFO", "WARNING", "ERROR"):
             rt.log_level = level
             logging.getLogger("vaultrequestrr").setLevel(level)
-        raise web.HTTPFound("/?msg=" + _q("Settings saved."))
+        raise web.HTTPFound("/settings?msg=" + _q("Settings saved."))
 
 
 # ---------------------------------------------------------------------------
@@ -399,7 +522,7 @@ def _layout(title: str, body: str, *, nav: bool = True) -> str:
         <nav class="nav">
           <a class="brand" href="/">VaultRequestrr</a>
           <div class="links">
-            <a href="/">Dashboard</a><a href="/links">Links</a><a href="/activity">Activity</a><a href="/issues">Issues</a><a href="/logs">Logs</a>
+            <a href="/">Dashboard</a><a href="/links">Links</a><a href="/activity">Activity</a><a href="/issues">Issues</a><a href="/logs">Logs</a><a href="/settings">Settings</a>
             <a href="/logout" class="muted">Sign out</a>
           </div>
         </nav>
@@ -430,7 +553,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:10px;bor
 th{color:var(--muted);font-weight:600;font-size:13px}
 code{background:#0c0e12;padding:2px 6px;border-radius:6px}
 button{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:8px 14px;cursor:pointer;font-size:14px}
-button:hover{filter:brightness(1.1)}button.danger{background:var(--bad)}
+button:hover{filter:brightness(1.1)}button.danger{background:var(--bad)}button.warn{background:#e3a008}
 input,select{background:#0c0e12;color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:14px}
 .actions{display:flex;gap:8px;flex-wrap:wrap}.inline{display:flex;gap:6px}
 label.check{display:block;margin:8px 0}label.field{display:block;margin:12px 0}

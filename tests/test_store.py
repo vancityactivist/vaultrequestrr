@@ -48,6 +48,18 @@ async def test_remove(store):
     assert await store.get("123") is None
 
 
+# -- app settings ----------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_app_setting_get_set_upsert(store):
+    assert await store.get_setting("seerr_url") is None
+    await store.set_setting("seerr_url", "http://a:5055")
+    assert await store.get_setting("seerr_url") == "http://a:5055"
+    await store.set_setting("seerr_url", "http://b:5055")
+    assert await store.get_setting("seerr_url") == "http://b:5055"
+
+
 # -- tracked issues --------------------------------------------------------
 
 

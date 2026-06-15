@@ -55,9 +55,21 @@ made through the bot are tracked.
 
 If `WEB_PASSWORD` is set, a small web dashboard is served on `WEB_PORT` (default
 `5056`): health (Discord/Seerr status), linked accounts (with unlink/remap),
-recent request activity, reported issues (with resolve/reopen actions), live log
-viewer (level filter + auto-refresh), and live-toggleable settings. Sign in with
-the password.
+recent request activity, reported issues (with resolve/reopen and **re-search**
+actions), a live log viewer (level filter + auto-refresh), and a **Settings**
+page. Sign in with the password.
+
+The Settings page lets you edit the **Seerr connection** (URL + API key) — the
+connection is validated before saving, applied immediately without a restart,
+and persisted to the database (the `SEERR_URL` / `SEERR_API_KEY` env vars are
+only the first-run default). It also exposes the bot behaviour toggles and a
+read-only view of the Radarr/Sonarr instances Seerr is wired to.
+
+**Re-search** lets an admin act on a bad download straight from an issue: it
+marks the last grabbed release as failed in Radarr/Sonarr, which blocklists that
+release and triggers a fresh search for a replacement. No extra configuration is
+needed — the Radarr/Sonarr connection details are read from Seerr's own settings
+at the time of the action.
 
 Commands:
 

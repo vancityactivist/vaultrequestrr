@@ -155,6 +155,24 @@ class RequestInfo:
 
 
 @dataclass(frozen=True)
+class ServiceInstance:
+    """Safe (no API key) view of a Radarr/Sonarr instance configured in Seerr."""
+    kind: str  # "radarr" or "sonarr"
+    name: str | None
+    hostname: str | None
+    port: int | None
+    use_ssl: bool
+    is_default: bool
+    is_4k: bool
+    profile: str | None
+
+    @property
+    def url(self) -> str:
+        scheme = "https" if self.use_ssl else "http"
+        return f"{scheme}://{self.hostname}:{self.port}"
+
+
+@dataclass(frozen=True)
 class IssueInfo:
     id: int
     issue_type: int | None  # ISSUE_* type code
@@ -470,6 +488,47 @@ class SeerrClient:
         """Resolve or reopen an issue."""
         await self._post(f"issue/{issue_id}/{'resolved' if resolved else 'open'}", None)
 
+    # -- arr (Radarr/Sonarr) integration -----------------------------------
+
+    async def get_media_service(
+        self, media_type: MediaType, tmdb_id: int
+    ) -> tuple[int | None, int | None]:
+        """Return (serviceId, externalServiceId) for a title's Radarr/Sonarr item.
+
+        serviceId selects which configured arr instance holds it; the external id
+        is that item's movieId/seriesId inside the arr. Either may be None when the
+        media isn't managed by an arr.
+        """
+        endpoint = "tv" if media_type == "tv" else "movie"
+        data = await self._get(f"{endpoint}/{tmdb_id}")
+        media_info = data.get("mediaInfo") or {}
+        return media_info.get("serviceId"), media_info.get("externalServiceId")
+
+    async def list_service_instances(self, kind: str) -> list["ServiceInstance"]:
+        """List configured Radarr/Sonarr instances (no API keys), for display."""
+        data = await self._get(f"settings/{kind}")
+        return [_to_service_instance(kind, raw) for raw in (data or [])]
+
+    async def get_arr_config(
+        self, media_type: MediaType, service_id: int | None
+    ) -> tuple[str, str]:
+        """Resolve the (base_url, api_key) for the arr instance holding the media.
+
+        Reads Seerr's own Radarr/Sonarr connection settings — the same creds Seerr
+        uses to talk to them — so no separate configuration is needed.
+        """
+        kind = "sonarr" if media_type == "tv" else "radarr"
+        instances = await self._get(f"settings/{kind}")
+        match = next((s for s in instances if s.get("id") == service_id), None)
+        if match is None and instances:
+            match = next((s for s in instances if s.get("isDefault")), instances[0])
+        if not match:
+            raise SeerrError(f"No {kind.title()} instance is configured in Seerr")
+
+        scheme = "https" if match.get("useSsl") else "http"
+        base_url = f"{scheme}://{match['hostname']}:{match['port']}{match.get('baseUrl') or ''}"
+        return base_url, match["apiKey"]
+
 
 # -- module-level parsing helpers -----------------------------------------
 
@@ -488,6 +547,19 @@ def _to_search_result(raw: dict[str, Any]) -> SearchResult:
         poster_url=f"https://image.tmdb.org/t/p/w500{poster}" if poster else None,
         status=media_info.get("status"),
         media_id=media_info.get("id"),
+    )
+
+
+def _to_service_instance(kind: str, raw: dict[str, Any]) -> ServiceInstance:
+    return ServiceInstance(
+        kind=kind,
+        name=raw.get("name"),
+        hostname=raw.get("hostname"),
+        port=raw.get("port"),
+        use_ssl=bool(raw.get("useSsl")),
+        is_default=bool(raw.get("isDefault")),
+        is_4k=bool(raw.get("is4k")),
+        profile=raw.get("activeProfileName"),
     )
 
 
