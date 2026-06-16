@@ -99,6 +99,26 @@ class RequestCog(commands.Cog):
     async def _start_search(
         self, interaction: discord.Interaction, media_type: str, title: str
     ) -> None:
+        """Apply the link gate first, then run the search.
+
+        Gating here (rather than at the Request button) means a user gets linked
+        even when their search turns out to be already available — in which case
+        the Request button is disabled and the old button-level gate never fired.
+        """
+        if self.bot.runtime.require_linking:
+            link = await self.bot.linker.get_link(str(interaction.user.id))
+            if link is None:
+                # First interaction ever: link, then the modal continues the search.
+                await interaction.response.send_modal(
+                    PlexLinkModal(self, continue_search=(media_type, title))
+                )
+                return
+        await self._run_search(interaction, media_type, title)
+
+    async def _run_search(
+        self, interaction: discord.Interaction, media_type: str, title: str
+    ) -> None:
+        """Search Seerr and show the result picker. Assumes the link gate passed."""
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
             results = await self.bot.seerr.search(title, media_type)
@@ -136,9 +156,10 @@ class RequestCog(commands.Cog):
         if self.bot.runtime.require_linking:
             link = await self.bot.linker.get_link(discord_id)
             if link is None:
-                # First request: prompt for Plex identity. The modal continues the flow.
+                # Fallback gate: normally the user is linked at search time, but
+                # this still covers require_linking being toggled on mid-session.
                 await interaction.response.send_modal(
-                    PlexLinkModal(self, media_type, result, seasons)
+                    PlexLinkModal(self, continue_request=(media_type, result, seasons))
                 )
                 return
             user_id = link.seerr_user_id
@@ -419,37 +440,43 @@ class PlexLinkModal(discord.ui.Modal, title="Link your Plex account"):
     def __init__(
         self,
         cog: RequestCog,
-        media_type: str,
-        result: SearchResult,
-        seasons: list[int] | str | None,
+        *,
+        continue_search: tuple[str, str] | None = None,
+        continue_request: tuple[str, SearchResult, list[int] | str | None] | None = None,
     ) -> None:
         super().__init__()
         self._cog = cog
-        self._media_type = media_type
-        self._result = result
-        self._seasons = seasons
+        # Exactly one continuation is set: resume the search, or submit the request.
+        self._continue_search = continue_search
+        self._continue_request = continue_request
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        # Deferred *update* so we can edit the original picker message in place.
-        await interaction.response.defer()
         discord_id = str(interaction.user.id)
         result = await self._cog.bot.linker.link(discord_id, str(self.identity.value))
 
         if result.status is LinkStatus.LINKED:
-            # _submit edits the picker message in place with the confirmation.
-            await self._cog._submit(
-                interaction, self._media_type, self._result, self._seasons, result.user.id
-            )
-        elif result.status is LinkStatus.NOT_FOUND:
+            if self._continue_search is not None:
+                media_type, title = self._continue_search
+                await self._cog._run_search(interaction, media_type, title)
+            else:
+                media_type, search_result, seasons = self._continue_request
+                # Deferred *update* so _submit can edit the picker message in place.
+                await interaction.response.defer()
+                await self._cog._submit(
+                    interaction, media_type, search_result, seasons, result.user.id
+                )
+            return
+
+        if result.status is LinkStatus.NOT_FOUND:
             seerr_url = self._cog.bot.config.seerr_url
-            await interaction.followup.send(
+            await interaction.response.send_message(
                 "❌ No matching Seerr account was found for that Plex username/email.\n"
                 f"Please log into Seerr once at {seerr_url} (so you get imported from Plex), "
                 "then run the request again.",
                 ephemeral=True,
             )
         else:  # ERROR
-            await interaction.followup.send(
+            await interaction.response.send_message(
                 f"⚠️ Couldn't reach Seerr to link your account: {result.message}",
                 ephemeral=True,
             )
