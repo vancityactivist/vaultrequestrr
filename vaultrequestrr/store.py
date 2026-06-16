@@ -51,6 +51,14 @@ CREATE TABLE IF NOT EXISTS tracked_issues (
     created_at          TEXT NOT NULL,
     updated_at          TEXT
 );
+
+CREATE TABLE IF NOT EXISTS invites (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    inviter_discord_id  TEXT NOT NULL,
+    invited_email       TEXT NOT NULL,
+    status              TEXT NOT NULL,
+    created_at          TEXT NOT NULL
+);
 """
 
 # Columns added after the table first shipped; applied idempotently on connect.
@@ -58,6 +66,10 @@ _MIGRATIONS = {
     "tracked_issues": {
         "problem_season": "INTEGER",
         "problem_episode": "INTEGER",
+    },
+    "account_links": {
+        # Per-user Plex invite cap; NULL means "use the global default".
+        "invite_limit": "INTEGER",
     },
 }
 
@@ -69,6 +81,7 @@ class AccountLink:
     plex_username: str | None
     email: str | None
     linked_at: str
+    invite_limit: int | None = None
 
 
 @dataclass(frozen=True)
@@ -102,6 +115,15 @@ class TrackedIssue:
     notified_resolved: bool
     created_at: str
     updated_at: str | None
+
+
+@dataclass(frozen=True)
+class InviteRecord:
+    id: int
+    inviter_discord_id: str
+    invited_email: str
+    status: str
+    created_at: str
 
 
 class LinkStore:
@@ -370,6 +392,52 @@ class LinkStore:
         )
         await self._conn.commit()
 
+    # -- Plex invites (per-user quota + audit) -----------------------------
+
+    async def add_invite(
+        self, inviter_discord_id: str, invited_email: str, status: str
+    ) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        await self._conn.execute(
+            """
+            INSERT INTO invites (inviter_discord_id, invited_email, status, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (inviter_discord_id, invited_email, status, now),
+        )
+        await self._conn.commit()
+
+    async def count_invites(self, inviter_discord_id: str) -> int:
+        """Count successful invites a user has sent (failures don't burn quota)."""
+        async with self._conn.execute(
+            "SELECT COUNT(*) AS n FROM invites WHERE inviter_discord_id = ? AND status = 'sent'",
+            (inviter_discord_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return int(row["n"]) if row else 0
+
+    async def recent_invites(self, limit: int = 100) -> list[InviteRecord]:
+        async with self._conn.execute(
+            "SELECT * FROM invites ORDER BY created_at DESC LIMIT ?", (limit,)
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [_row_to_invite(row) for row in rows]
+
+    async def invites_sent_total(self) -> int:
+        async with self._conn.execute(
+            "SELECT COUNT(*) AS n FROM invites WHERE status = 'sent'"
+        ) as cursor:
+            row = await cursor.fetchone()
+        return int(row["n"]) if row else 0
+
+    async def set_invite_limit(self, discord_id: str, limit: int | None) -> None:
+        """Set (or clear, with None) a per-user invite cap override."""
+        await self._conn.execute(
+            "UPDATE account_links SET invite_limit = ? WHERE discord_id = ?",
+            (limit, discord_id),
+        )
+        await self._conn.commit()
+
 
 def _row_to_tracked(row: aiosqlite.Row) -> TrackedRequest:
     return TrackedRequest(
@@ -406,11 +474,23 @@ def _row_to_tracked_issue(row: aiosqlite.Row) -> TrackedIssue:
     )
 
 
+def _row_to_invite(row: aiosqlite.Row) -> InviteRecord:
+    return InviteRecord(
+        id=row["id"],
+        inviter_discord_id=row["inviter_discord_id"],
+        invited_email=row["invited_email"],
+        status=row["status"],
+        created_at=row["created_at"],
+    )
+
+
 def _row_to_link(row: aiosqlite.Row) -> AccountLink:
+    keys = row.keys()
     return AccountLink(
         discord_id=row["discord_id"],
         seerr_user_id=row["seerr_user_id"],
         plex_username=row["plex_username"],
         email=row["email"],
         linked_at=row["linked_at"],
+        invite_limit=row["invite_limit"] if "invite_limit" in keys else None,
     )

@@ -31,6 +31,16 @@ class FakeSeerr:
         return "http://radarr:7878", "key"
 
 
+class FakePlex:
+    async def list_libraries(self):
+        from vaultrequestrr.plex import PlexLibrary
+
+        return [PlexLibrary(1, "Movies", "movie"), PlexLibrary(2, "TV", "show")]
+
+    async def aclose(self):
+        pass
+
+
 class FakeBot:
     def __init__(self, store):
         self.store = store
@@ -50,6 +60,8 @@ class FakeBot:
             log_level="INFO",
         )
         self.applied = None
+        self.plex = None
+        self.plex_applied = None
 
     @property
     def seerr_url(self):
@@ -57,6 +69,13 @@ class FakeBot:
 
     async def apply_seerr_connection(self, url, key):
         self.applied = (url, key)
+
+    async def plex_client_id(self):
+        return "cid"
+
+    async def apply_plex_connection(self, token, machine_id):
+        self.plex_applied = (token, machine_id)
+        self.plex = FakePlex()
 
     def is_ready(self):
         return True
@@ -279,3 +298,174 @@ async def test_unlink_action(client):
 
     await cli.post("/links/unlink", data={"discord_id": "999"}, allow_redirects=False)
     assert await store.get("999") is None
+
+
+# -- Plex invites ----------------------------------------------------------
+
+
+class _FakePlexAuth:
+    """Stand-in for PlexAuth in the web login/server flow."""
+
+    token = "owner-token"
+    servers = None
+
+    def __init__(self, *, transport=None):
+        pass
+
+    async def create_pin(self, client_id):
+        return 42, "ABCD", "https://app.plex.tv/auth#?clientID=cid&code=ABCD"
+
+    async def check_pin(self, pin_id, client_id, code=None):
+        return _FakePlexAuth.token
+
+    async def list_servers(self, token, client_id):
+        from vaultrequestrr.plex import PlexServer
+
+        if _FakePlexAuth.servers is not None:
+            return _FakePlexAuth.servers
+        return [PlexServer("Home", "machine123")]
+
+    async def aclose(self):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_settings_page_shows_login_when_no_plex(client):
+    cli, _store, _dash = client
+    await cli.post("/login", data={"password": "secret"})
+    body = await (await cli.get("/settings")).text()
+    assert "Plex Invites" in body and "Login with Plex" in body
+
+
+@pytest.mark.asyncio
+async def test_plex_login_and_poll_persists_token(client, monkeypatch):
+    cli, store, _dash = client
+    await cli.post("/login", data={"password": "secret"})
+    monkeypatch.setattr("vaultrequestrr.web.PlexAuth", _FakePlexAuth)
+    _FakePlexAuth.token = "owner-token"
+
+    r = await cli.post("/settings/plex/login")
+    d = await r.json()
+    assert d["pin_id"] == 42 and "auth_url" in d
+
+    poll = await (await cli.get(f"/settings/plex/poll?pin_id={d['pin_id']}")).json()
+    assert poll["authenticated"] is True
+    assert await store.get_setting("plex_token") == "owner-token"
+
+
+@pytest.mark.asyncio
+async def test_plex_poll_not_yet_authorised(client, monkeypatch):
+    cli, store, _dash = client
+    await cli.post("/login", data={"password": "secret"})
+    monkeypatch.setattr("vaultrequestrr.web.PlexAuth", _FakePlexAuth)
+    _FakePlexAuth.token = None
+    try:
+        poll = await (await cli.get("/settings/plex/poll?pin_id=42")).json()
+        assert poll["authenticated"] is False
+        assert await store.get_setting("plex_token") is None
+    finally:
+        _FakePlexAuth.token = "owner-token"
+
+
+@pytest.mark.asyncio
+async def test_plex_server_action_connects(client, monkeypatch):
+    cli, store, dash = client
+    await cli.post("/login", data={"password": "secret"})
+    await store.set_setting("plex_token", "owner-token")
+
+    resp = await cli.post(
+        "/settings/plex/server",
+        data={"server": "machine123|Home"},
+        allow_redirects=False,
+    )
+    assert resp.status == 302
+    assert await store.get_setting("plex_machine_id") == "machine123"
+    assert await store.get_setting("plex_server_name") == "Home"
+    assert dash.bot.plex_applied == ("owner-token", "machine123")
+
+
+@pytest.mark.asyncio
+async def test_plex_invite_settings_saved(client):
+    cli, store, dash = client
+    await cli.post("/login", data={"password": "secret"})
+    # Pretend Plex is connected so the controls render and save.
+    await store.set_setting("plex_token", "owner-token")
+    await store.set_setting("plex_machine_id", "machine123")
+    await store.set_setting("plex_server_name", "Home")
+    dash.bot.plex = FakePlex()
+
+    page = await (await cli.get("/settings")).text()
+    assert "Enable" in page and "Movies" in page  # library list rendered
+
+    resp = await cli.post(
+        "/settings/plex",
+        data=[("enabled", "on"), ("limit", "5"), ("library", "1"), ("library", "2")],
+        allow_redirects=False,
+    )
+    assert resp.status == 302
+    assert await store.get_setting("plex_invites_enabled") == "1"
+    assert await store.get_setting("plex_invite_limit") == "5"
+    assert await store.get_setting("plex_shared_libraries") == "1,2"
+
+
+@pytest.mark.asyncio
+async def test_plex_disconnect_clears(client):
+    cli, store, dash = client
+    await cli.post("/login", data={"password": "secret"})
+    await store.set_setting("plex_token", "owner-token")
+    await store.set_setting("plex_machine_id", "machine123")
+    dash.bot.plex = FakePlex()
+
+    resp = await cli.post("/settings/plex/disconnect", allow_redirects=False)
+    assert resp.status == 302
+    assert not await store.get_setting("plex_token")
+    assert not await store.get_setting("plex_machine_id")
+    assert dash.bot.plex is None
+
+
+@pytest.mark.asyncio
+async def test_per_user_invite_limit_override(client):
+    cli, store, _dash = client
+    await store.save("999", 7, "alice", "a@e.com")
+    await cli.post("/login", data={"password": "secret"})
+
+    resp = await cli.post(
+        "/links/limit", data={"discord_id": "999", "limit": "10"}, allow_redirects=False
+    )
+    assert resp.status == 302 and resp.headers["Location"].startswith("/links")
+    assert (await store.get("999")).invite_limit == 10
+
+    # blank clears the override
+    await cli.post("/links/limit", data={"discord_id": "999", "limit": ""})
+    assert (await store.get("999")).invite_limit is None
+
+
+@pytest.mark.asyncio
+async def test_links_page_shows_invite_column(client):
+    cli, store, _dash = client
+    await store.save("999", 7, "alice", "a@e.com")
+    await store.add_invite("999", "friend@e.com", status="sent")
+    await cli.post("/login", data={"password": "secret"})
+    body = await (await cli.get("/links")).text()
+    assert "Invites (used / limit)" in body
+
+
+@pytest.mark.asyncio
+async def test_invites_page_lists_sent(client):
+    cli, store, _dash = client
+    await store.save("999", 7, "alice", "a@e.com")
+    await store.add_invite("999", "friend@e.com", status="sent")
+    await store.add_invite("999", "dupe@e.com", status="failed")
+    await cli.post("/login", data={"password": "secret"})
+    body = await (await cli.get("/invites")).text()
+    assert "friend@e.com" in body and "dupe@e.com" in body
+    assert "alice" in body and "Sent" in body and "Failed" in body
+
+
+@pytest.mark.asyncio
+async def test_dashboard_shows_plex_status(client):
+    cli, store, dash = client
+    await cli.post("/login", data={"password": "secret"})
+    body = await (await cli.get("/")).text()
+    assert "Plex" in body and "Not connected" in body
+    assert "Invites sent" in body

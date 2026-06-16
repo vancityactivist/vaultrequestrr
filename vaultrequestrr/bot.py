@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 
 import discord
 from discord.ext import commands
@@ -9,6 +10,7 @@ from discord.ext import commands
 from .config import Config
 from .linking import AccountLinker
 from .notifications import NotificationService
+from .plex import PlexClient
 from .runtime import RuntimeSettings
 from .seerr import SeerrClient, SeerrError
 from .store import LinkStore
@@ -29,11 +31,31 @@ class VaultRequestrr(commands.Bot):
         self.linker = AccountLinker(self.seerr, self.store)
         self.notifications = NotificationService(self)
         self.web = WebDashboard(self)
+        self.plex: PlexClient | None = None
 
     @property
     def seerr_url(self) -> str:
         """The Seerr base URL the live client is currently using."""
         return self._seerr_url
+
+    async def plex_client_id(self) -> str:
+        """Stable Plex client identifier, generated once and persisted."""
+        client_id = await self.store.get_setting("plex_client_id")
+        if not client_id:
+            client_id = str(uuid.uuid4())
+            await self.store.set_setting("plex_client_id", client_id)
+        return client_id
+
+    async def apply_plex_connection(self, token: str, machine_id: str) -> None:
+        """Build/swap the live Plex client for the chosen server + owner token."""
+        client_id = await self.plex_client_id()
+        old = self.plex
+        self.plex = PlexClient(token, client_id, machine_id)
+        if old is not None:
+            try:
+                await old.aclose()
+            except Exception:  # noqa: BLE001 - best effort closing the old client
+                logger.debug("Failed to close previous Plex client", exc_info=True)
 
     async def apply_seerr_connection(self, url: str, api_key: str) -> None:
         """Swap the live Seerr client (and the linker that holds it) to new creds."""
@@ -63,12 +85,21 @@ class VaultRequestrr(commands.Bot):
         except SeerrError as exc:
             logger.warning("Could not verify Seerr connection: %s", exc)
 
+        # Restore the Plex connection (web-UI configured, no env fallback).
+        plex_token = await self.store.get_setting("plex_token")
+        plex_machine_id = await self.store.get_setting("plex_machine_id")
+        if plex_token and plex_machine_id:
+            await self.apply_plex_connection(plex_token, plex_machine_id)
+            logger.info("Plex invites enabled (server %s)", plex_machine_id)
+
         # Import here to avoid a circular import at module load.
+        from .cogs.invites import InviteCog
         from .cogs.issues import IssueCog
         from .cogs.requests import RequestCog
 
         await self.add_cog(RequestCog(self))
         await self.add_cog(IssueCog(self))
+        await self.add_cog(InviteCog(self))
 
         if self.config.discord_guild_id:
             guild = discord.Object(id=self.config.discord_guild_id)
@@ -98,5 +129,7 @@ class VaultRequestrr(commands.Bot):
         self.notifications.stop()
         await self.web.stop()
         await self.seerr.aclose()
+        if self.plex is not None:
+            await self.plex.aclose()
         await self.store.close()
         await super().close()
