@@ -45,6 +45,17 @@ a single episode. Because Seerr's API attributes every API-key issue to the admi
 account, the real reporter is recorded in the issue message and tracked locally so
 the dashboard and resolution DMs know who filed it.
 
+### Inviting friends to Plex
+
+Linked users can run `/invite` to bring a friend onto the Plex server. The bot
+asks for the friend's Plex email and issues a real Plex share, so **Plex emails
+the friend** the invite — Discord only triggers it. Invites are gated three ways:
+an admin must connect Plex and enable invites, the inviter must have linked their
+own account, and each user has a configurable cap (default **3**, overridable
+per-user on the Links page). Connect Plex from the Settings page with **Login
+with Plex** (PIN OAuth — no token to copy), then pick which server and which
+libraries to share. Sent invites are listed on the dashboard **Invites** page.
+
 ### Notifications
 
 The bot polls Seerr on a timer and **DMs the requester** when their request
@@ -55,16 +66,18 @@ made through the bot are tracked.
 ### Admin dashboard
 
 If `WEB_PASSWORD` is set, a small web dashboard is served on `WEB_PORT` (default
-`5056`): health (Discord/Seerr status), linked accounts (with unlink/remap),
-recent request activity, reported issues (with resolve/reopen and **re-search**
-actions), a live log viewer (level filter + auto-refresh), and a **Settings**
-page. Sign in with the password.
+`5056`): health (Discord/Seerr/Plex status), linked accounts (with unlink/remap
+and per-user invite caps), recent request activity, reported issues (with
+resolve/reopen and **re-search** actions), sent Plex invites, a live log viewer
+(level filter + auto-refresh), and a **Settings** page. Sign in with the password.
 
 The Settings page lets you edit the **Seerr connection** (URL + API key) — the
 connection is validated before saving, applied immediately without a restart,
 and persisted to the database (the `SEERR_URL` / `SEERR_API_KEY` env vars are
-only the first-run default). It also exposes the bot behaviour toggles and a
-read-only view of the Radarr/Sonarr instances Seerr is wired to.
+only the first-run default). It also exposes the bot behaviour toggles, a
+**Plex Invites** section (Login with Plex, server + library selection, enable
+toggle and per-user invite cap), and a read-only view of the Radarr/Sonarr
+instances Seerr is wired to.
 
 **Re-search** lets an admin act on a bad download straight from an issue: it
 deletes the current file in Radarr/Sonarr and triggers a fresh search for a
@@ -81,6 +94,7 @@ Commands:
 | `/movie <title>` | Search for and request a movie |
 | `/tv <title>` | Search for and request a TV show (with season selection) |
 | `/issue <title>` | Report a Video/Audio/Subtitle/Other problem with media on the server |
+| `/invite` | Invite a friend to Plex by email (linked users; admin-enabled) |
 | `/quota` | Show your remaining request quota and when it resets |
 | `/linkstatus` | Show which Seerr account you're linked to |
 | `/unlink` | Remove your link (you'll be asked again on the next request) |

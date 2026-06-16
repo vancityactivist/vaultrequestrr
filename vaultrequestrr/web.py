@@ -17,6 +17,7 @@ from aiohttp import web
 from .arr import ArrError, research_media
 from .linking import LinkStatus
 from .logbuffer import get_records
+from .plex import PlexAuth, PlexError
 from .seerr import (
     ISSUE_OPEN,
     ISSUE_RESOLVED,
@@ -39,6 +40,8 @@ class WebDashboard:
         self.bot = bot
         self._runner: web.AppRunner | None = None
         self._sessions: set[str] = set()
+        # Short-lived Plex login PINs in flight: pin_id -> code.
+        self._plex_pins: dict[int, str] = {}
 
     def build_app(self) -> web.Application:
         app = web.Application(middlewares=[self._auth_middleware])
@@ -51,6 +54,8 @@ class WebDashboard:
                 web.get("/links", self.links_page),
                 web.post("/links/unlink", self.unlink_action),
                 web.post("/links/remap", self.remap_action),
+                web.post("/links/limit", self.limit_action),
+                web.get("/invites", self.invites_page),
                 web.get("/activity", self.activity_page),
                 web.get("/issues", self.issues_page),
                 web.post("/issues/resolve", self.issue_resolve_action),
@@ -60,6 +65,11 @@ class WebDashboard:
                 web.get("/settings", self.settings_page),
                 web.post("/settings", self.settings_action),
                 web.post("/settings/connection", self.connection_action),
+                web.post("/settings/plex/login", self.plex_login_action),
+                web.get("/settings/plex/poll", self.plex_poll_action),
+                web.post("/settings/plex/server", self.plex_server_action),
+                web.post("/settings/plex", self.plex_invites_action),
+                web.post("/settings/plex/disconnect", self.plex_disconnect_action),
             ]
         )
         return app
@@ -134,29 +144,52 @@ class WebDashboard:
         pending = await self.bot.store.pending_tracked()
         msg = _flash(request)
 
+        plex_ok = self.bot.plex is not None
+        if not plex_ok:
+            plex_msg = "Not connected"
+        elif (await self.bot.store.get_setting("plex_invites_enabled")) == "1":
+            plex_msg = "Invites on"
+        else:
+            plex_msg = "Invites off"
+        invites_sent = await self.bot.store.invites_sent_total()
+
         body = f"""
         {msg}
         <div class="grid">
           <div class="card stat"><div class="num">{len(links)}</div><div class="muted">Linked users</div></div>
           <div class="card stat"><div class="num">{len(pending)}</div><div class="muted">Pending requests</div></div>
+          <div class="card stat"><div class="num">{invites_sent}</div><div class="muted"><a href="/invites">Invites sent</a></div></div>
           <div class="card stat"><div class="num">{_dot(discord_ok)} Discord</div><div class="muted">{'Ready' if discord_ok else 'Connecting…'}</div></div>
           <div class="card stat"><div class="num">{_dot(seerr_ok)} Seerr</div><div class="muted">{html.escape(seerr_msg)}</div></div>
+          <div class="card stat"><div class="num">{_dot(plex_ok)} Plex</div><div class="muted">{html.escape(plex_msg)}</div></div>
         </div>
-        <p class="muted small">Manage the Seerr connection and bot behaviour on the
+        <p class="muted small">Manage the Seerr/Plex connections and bot behaviour on the
           <a href="/settings">Settings</a> page.</p>
         """
         return _html(_layout("Dashboard", body))
 
     async def links_page(self, request: web.Request) -> web.Response:
         links = await self.bot.store.list_links()
+        global_limit = await self.bot.store.get_setting("plex_invite_limit") or "3"
         rows = ""
         for link in links:
             who = html.escape(link.plex_username or link.email or "—")
+            used = await self.bot.store.count_invites(link.discord_id)
+            effective = link.invite_limit if link.invite_limit is not None else global_limit
+            override_val = "" if link.invite_limit is None else str(link.invite_limit)
+            placeholder = f"default ({html.escape(str(global_limit))})"
             rows += f"""
             <tr>
               <td><code>{html.escape(link.discord_id)}</code></td>
               <td>{who}</td>
               <td>{link.seerr_user_id}</td>
+              <td>{used} / {html.escape(str(effective))}
+                <form method="post" action="/links/limit" class="inline">
+                  <input type="hidden" name="discord_id" value="{html.escape(link.discord_id)}">
+                  <input type="number" name="limit" min="0" value="{override_val}" placeholder="{placeholder}" style="width:7em">
+                  <button>Set</button>
+                </form>
+              </td>
               <td>{html.escape(link.linked_at[:19])}</td>
               <td class="actions">
                 <form method="post" action="/links/unlink" onsubmit="return confirm('Unlink this user?')">
@@ -171,16 +204,18 @@ class WebDashboard:
               </td>
             </tr>"""
         if not links:
-            rows = '<tr><td colspan="5" class="muted">No linked users yet.</td></tr>'
+            rows = '<tr><td colspan="6" class="muted">No linked users yet.</td></tr>'
 
         body = f"""
         {_flash(request)}
         <div class="card">
           <h2>Linked accounts ({len(links)})</h2>
           <table>
-            <thead><tr><th>Discord ID</th><th>Plex/Seerr</th><th>Seerr ID</th><th>Linked</th><th>Actions</th></tr></thead>
+            <thead><tr><th>Discord ID</th><th>Plex/Seerr</th><th>Seerr ID</th><th>Invites (used / limit)</th><th>Linked</th><th>Actions</th></tr></thead>
             <tbody>{rows}</tbody>
           </table>
+          <p class="muted small">Leave an invite limit blank to use the global default
+            ({html.escape(str(global_limit))}, set on the <a href="/settings">Settings</a> page).</p>
         </div>
         """
         return _html(_layout("Links", body))
@@ -209,6 +244,40 @@ class WebDashboard:
         </div>
         """
         return _html(_layout("Activity", body))
+
+    async def invites_page(self, request: web.Request) -> web.Response:
+        items = await self.bot.store.recent_invites(200)
+        rows = ""
+        for it in items:
+            link = await self.bot.store.get(it.inviter_discord_id)
+            who = it.inviter_discord_id
+            if link is not None:
+                who = link.plex_username or link.email or it.inviter_discord_id
+            badge = (
+                '<span class="badge ok">Sent</span>'
+                if it.status == "sent"
+                else '<span class="badge bad">Failed</span>'
+            )
+            rows += f"""
+            <tr>
+              <td>{html.escape(who)}</td>
+              <td>{html.escape(it.invited_email)}</td>
+              <td>{badge}</td>
+              <td>{html.escape((it.created_at or '')[:19])}</td>
+            </tr>"""
+        if not items:
+            rows = '<tr><td colspan="4" class="muted">No invites sent yet.</td></tr>'
+        body = f"""
+        <div class="card">
+          <h2>Plex invites ({len(items)})</h2>
+          <table>
+            <thead><tr><th>Inviter</th><th>Invited email</th><th>Status</th><th>When</th></tr></thead>
+            <tbody>{rows}</tbody>
+          </table>
+          <p class="muted small">Per-user invite caps are set on the <a href="/links">Links</a> page.</p>
+        </div>
+        """
+        return _html(_layout("Invites", body))
 
     async def issues_page(self, request: web.Request) -> web.Response:
         items = await self.bot.store.recent_issues(100)
@@ -360,6 +429,8 @@ class WebDashboard:
             arr_rows = ""
             arr_note = f'<tr><td colspan="5" class="muted">Couldn\'t reach Seerr: {html.escape(str(exc))}</td></tr>'
 
+        plex_card = await self._plex_card()
+
         body = f"""
         {_flash(request)}
         <div class="card">
@@ -392,6 +463,8 @@ class WebDashboard:
           </form>
           <p class="muted small">These apply immediately but reset to env defaults on restart.</p>
         </div>
+
+        {plex_card}
 
         <div class="card">
           <h2>Download managers <span class="muted small">(from Seerr — read only)</span></h2>
@@ -427,6 +500,17 @@ class WebDashboard:
         if result.status is LinkStatus.NOT_FOUND:
             raise web.HTTPFound("/links?msg=" + _q("No matching Seerr user found."))
         raise web.HTTPFound("/links?msg=" + _q("Seerr error during remap."))
+
+    async def limit_action(self, request: web.Request) -> web.Response:
+        data = await request.post()
+        discord_id = str(data.get("discord_id", ""))
+        raw = str(data.get("limit", "")).strip()
+        if not discord_id:
+            raise web.HTTPFound("/links?msg=" + _q("Missing user."))
+        limit = int(raw) if raw.isdigit() else None  # blank clears the override
+        await self.bot.store.set_invite_limit(discord_id, limit)
+        note = "Invite limit cleared (uses default)." if limit is None else f"Invite limit set to {limit}."
+        raise web.HTTPFound("/links?msg=" + _q(note))
 
     async def issue_resolve_action(self, request: web.Request) -> web.Response:
         await self._set_issue_status(request, resolved=True)
@@ -500,6 +584,173 @@ class WebDashboard:
         await self.bot.apply_seerr_connection(url, effective_key)
         raise web.HTTPFound("/settings?msg=" + _q("Seerr connection saved."))
 
+    # -- Plex invites ------------------------------------------------------
+
+    async def _plex_card(self) -> str:
+        """Render the Plex Invites card in one of three states."""
+        token = await self.bot.store.get_setting("plex_token")
+        machine_id = await self.bot.store.get_setting("plex_machine_id")
+
+        if not token:
+            # State A: not authenticated — offer Login with Plex.
+            inner = """
+            <p class="muted small">Connect your Plex account so members can invite friends
+              with <code>/invite</code>. We use Plex's own "Login with Plex" — no token to copy.</p>
+            <button type="button" id="plexLogin">Login with Plex</button>
+            <p class="muted small" id="plexLoginMsg"></p>
+            """ + _PLEX_LOGIN_JS
+        elif not machine_id:
+            # State B: authenticated, pick a server.
+            inner = await self._plex_server_picker(token)
+        else:
+            # State C: fully connected — invite controls.
+            inner = await self._plex_invite_controls()
+
+        return f'<div class="card"><h2>Plex Invites</h2>{inner}</div>'
+
+    async def _plex_server_picker(self, token: str) -> str:
+        client_id = await self.bot.plex_client_id()
+        auth = PlexAuth()
+        try:
+            servers = await auth.list_servers(token, client_id)
+        except PlexError as exc:
+            return (
+                f'<p class="muted small">Connected to Plex, but couldn\'t list your servers: '
+                f'{html.escape(str(exc))}</p>'
+                '<form method="post" action="/settings/plex/disconnect">'
+                '<button class="danger">Disconnect Plex</button></form>'
+            )
+        finally:
+            await auth.aclose()
+
+        if not servers:
+            return (
+                '<p class="muted small">No owned Plex servers found on this account.</p>'
+                '<form method="post" action="/settings/plex/disconnect">'
+                '<button class="danger">Disconnect Plex</button></form>'
+            )
+        options = "".join(
+            f'<option value="{html.escape(s.machine_id)}|{html.escape(s.name)}">'
+            f'{html.escape(s.name)}</option>'
+            for s in servers
+        )
+        return f"""
+        <p class="muted small">Authenticated with Plex. Choose which server to share:</p>
+        <form method="post" action="/settings/plex/server">
+          <label class="field">Server
+            <select name="server">{options}</select>
+          </label>
+          <button type="submit">Use this server</button>
+        </form>
+        """
+
+    async def _plex_invite_controls(self) -> str:
+        server_name = await self.bot.store.get_setting("plex_server_name") or "your Plex server"
+        enabled = (await self.bot.store.get_setting("plex_invites_enabled")) == "1"
+        limit = await self.bot.store.get_setting("plex_invite_limit") or "3"
+        selected = {
+            part.strip()
+            for part in (await self.bot.store.get_setting("plex_shared_libraries") or "").split(",")
+            if part.strip()
+        }
+
+        lib_rows = ""
+        if self.bot.plex is not None:
+            try:
+                for lib in await self.bot.plex.list_libraries():
+                    checked = _checked(str(lib.section_id) in selected)
+                    lib_rows += (
+                        f'<label class="check"><input type="checkbox" name="library" '
+                        f'value="{lib.section_id}" {checked}> {html.escape(lib.title)} '
+                        f'<span class="muted small">({html.escape(lib.kind)})</span></label>'
+                    )
+            except PlexError as exc:
+                lib_rows = f'<p class="muted small">Couldn\'t load libraries: {html.escape(str(exc))}</p>'
+        if not lib_rows:
+            lib_rows = '<p class="muted small">No libraries found. Friends would get access to all libraries.</p>'
+
+        return f"""
+        <p class="muted small">Connected to <strong>{html.escape(server_name)}</strong>.
+          <form method="post" action="/settings/plex/disconnect" class="inline" style="display:inline">
+            <button class="danger">Disconnect</button>
+          </form>
+        </p>
+        <form method="post" action="/settings/plex">
+          <label class="check"><input type="checkbox" name="enabled" {_checked(enabled)}> Enable <code>/invite</code> for linked users</label>
+          <label class="field">Invites per user
+            <input type="number" name="limit" min="0" value="{html.escape(limit)}">
+          </label>
+          <p class="muted small">Libraries to share with invited friends:</p>
+          {lib_rows}
+          <button type="submit">Save invite settings</button>
+        </form>
+        """
+
+    async def plex_login_action(self, request: web.Request) -> web.Response:
+        client_id = await self.bot.plex_client_id()
+        auth = PlexAuth()
+        try:
+            pin_id, code, auth_url = await auth.create_pin(client_id)
+        except PlexError as exc:
+            return web.json_response({"error": str(exc)}, status=502)
+        finally:
+            await auth.aclose()
+        self._plex_pins[pin_id] = code
+        return web.json_response({"pin_id": pin_id, "auth_url": auth_url})
+
+    async def plex_poll_action(self, request: web.Request) -> web.Response:
+        try:
+            pin_id = int(request.query.get("pin_id", ""))
+        except ValueError:
+            return web.json_response({"error": "bad pin"}, status=400)
+        client_id = await self.bot.plex_client_id()
+        code = self._plex_pins.get(pin_id)
+        auth = PlexAuth()
+        try:
+            token = await auth.check_pin(pin_id, client_id, code)
+        except PlexError as exc:
+            return web.json_response({"error": str(exc)}, status=502)
+        finally:
+            await auth.aclose()
+        if not token:
+            return web.json_response({"authenticated": False})
+        await self.bot.store.set_setting("plex_token", token)
+        self._plex_pins.pop(pin_id, None)
+        return web.json_response({"authenticated": True})
+
+    async def plex_server_action(self, request: web.Request) -> web.Response:
+        data = await request.post()
+        machine_id, _, name = str(data.get("server", "")).partition("|")
+        token = await self.bot.store.get_setting("plex_token")
+        if not (machine_id and token):
+            raise web.HTTPFound("/settings?msg=" + _q("Pick a server first."))
+        await self.bot.store.set_setting("plex_machine_id", machine_id)
+        await self.bot.store.set_setting("plex_server_name", name or machine_id)
+        await self.bot.apply_plex_connection(token, machine_id)
+        raise web.HTTPFound("/settings?msg=" + _q("Plex server connected."))
+
+    async def plex_invites_action(self, request: web.Request) -> web.Response:
+        data = await request.post()
+        await self.bot.store.set_setting(
+            "plex_invites_enabled", "1" if "enabled" in data else "0"
+        )
+        limit = str(data.get("limit", "3")).strip()
+        if limit.isdigit():
+            await self.bot.store.set_setting("plex_invite_limit", limit)
+        libraries = ",".join(
+            str(v) for v in data.getall("library", []) if str(v).strip().isdigit()
+        )
+        await self.bot.store.set_setting("plex_shared_libraries", libraries)
+        raise web.HTTPFound("/settings?msg=" + _q("Invite settings saved."))
+
+    async def plex_disconnect_action(self, request: web.Request) -> web.Response:
+        for key in ("plex_token", "plex_machine_id", "plex_server_name"):
+            await self.bot.store.set_setting(key, "")
+        if self.bot.plex is not None:
+            await self.bot.plex.aclose()
+            self.bot.plex = None
+        raise web.HTTPFound("/settings?msg=" + _q("Plex disconnected."))
+
     async def settings_action(self, request: web.Request) -> web.Response:
         data = await request.post()
         rt = self.bot.runtime
@@ -529,7 +780,7 @@ def _layout(title: str, body: str, *, nav: bool = True) -> str:
         <nav class="nav">
           <a class="brand" href="/">VaultRequestrr</a>
           <div class="links">
-            <a href="/">Dashboard</a><a href="/links">Links</a><a href="/activity">Activity</a><a href="/issues">Issues</a><a href="/logs">Logs</a><a href="/settings">Settings</a>
+            <a href="/">Dashboard</a><a href="/links">Links</a><a href="/activity">Activity</a><a href="/issues">Issues</a><a href="/invites">Invites</a><a href="/logs">Logs</a><a href="/settings">Settings</a>
             <a href="/logout" class="muted">Sign out</a>
           </div>
         </nav>
@@ -578,6 +829,39 @@ label.check{display:block;margin:8px 0}label.field{display:block;margin:12px 0}
 .logline .lvl{font-weight:600}
 .lvl-WARNING .lvl{color:#e3a008}.lvl-ERROR .lvl,.lvl-CRITICAL .lvl{color:var(--bad)}.lvl-DEBUG{opacity:.7}
 .lvl-ERROR .lmsg,.lvl-CRITICAL .lmsg{color:#f7a6a7}
+"""
+
+
+_PLEX_LOGIN_JS = """
+<script>
+(function(){
+  var btn = document.getElementById('plexLogin');
+  var msg = document.getElementById('plexLoginMsg');
+  if(!btn) return;
+  btn.addEventListener('click', async function(){
+    btn.disabled = true; msg.textContent = 'Opening Plex…';
+    try {
+      var r = await fetch('/settings/plex/login', {method:'POST'});
+      var d = await r.json();
+      if(d.error){ msg.textContent = d.error; btn.disabled = false; return; }
+      var popup = window.open(d.auth_url, 'plexAuth', 'width=600,height=700');
+      msg.textContent = 'Waiting for you to authorise in Plex…';
+      var tries = 0;
+      var timer = setInterval(async function(){
+        tries++;
+        if(tries > 150){ clearInterval(timer); msg.textContent = 'Timed out — try again.'; btn.disabled = false; return; }
+        try {
+          var pr = await fetch('/settings/plex/poll?pin_id=' + d.pin_id);
+          var pd = await pr.json();
+          if(pd.authenticated){ clearInterval(timer); if(popup) popup.close(); location.reload(); }
+        } catch(e) {}
+      }, 2000);
+    } catch(e) {
+      msg.textContent = 'Could not start Plex login.'; btn.disabled = false;
+    }
+  });
+})();
+</script>
 """
 
 
