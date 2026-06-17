@@ -1,3 +1,6 @@
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Make the repo root importable so `import vaultrequestrr` works regardless of
+# whether pytest is invoked as `pytest` or `python -m pytest` (CI uses the former).
+pythonpath = ["."]
