@@ -455,33 +455,11 @@ async def test_get_media_service_reads_ids():
 
 
 @pytest.mark.asyncio
-async def test_get_arr_config_builds_base_url_and_matches_instance():
-    instances = [
-        {"id": 0, "hostname": "10.0.0.10", "port": 7878, "useSsl": False, "apiKey": "rk", "baseUrl": None},
-        {"id": 1, "hostname": "10.0.0.11", "port": 443, "useSsl": True, "apiKey": "rk4k", "isDefault": True},
-    ]
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/api/v1/settings/radarr"
-        return httpx.Response(200, json=instances)
-
-    client = make_client(handler)
-    try:
-        base, key = await client.get_arr_config("movie", 0)
-        assert base == "http://10.0.0.10:7878" and key == "rk"
-        # Unknown service id falls back to the default instance.
-        base2, key2 = await client.get_arr_config("movie", 99)
-        assert base2 == "https://10.0.0.11:443" and key2 == "rk4k"
-    finally:
-        await client.aclose()
-
-
-@pytest.mark.asyncio
 async def test_list_service_instances_omits_api_key():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/v1/settings/radarr"
         return httpx.Response(200, json=[
-            {"name": "Radarr", "hostname": "h", "port": 7878, "useSsl": False,
+            {"id": 3, "name": "Radarr", "hostname": "h", "port": 7878, "useSsl": False,
              "isDefault": True, "is4k": False, "activeProfileName": "HD", "apiKey": "secret"},
         ])
 
@@ -493,23 +471,10 @@ async def test_list_service_instances_omits_api_key():
 
     assert len(instances) == 1
     inst = instances[0]
+    assert inst.id == 3  # serviceId is captured for instance mapping
     assert inst.url == "http://h:7878" and inst.profile == "HD" and inst.is_default
     # the dataclass has no field that could leak the API key
     assert "secret" not in str(inst)
-
-
-@pytest.mark.asyncio
-async def test_get_arr_config_uses_sonarr_for_tv():
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/api/v1/settings/sonarr"
-        return httpx.Response(200, json=[{"id": 0, "hostname": "h", "port": 8989, "apiKey": "sk"}])
-
-    client = make_client(handler)
-    try:
-        base, key = await client.get_arr_config("tv", 0)
-        assert base == "http://h:8989" and key == "sk"
-    finally:
-        await client.aclose()
 
 
 @pytest.mark.asyncio

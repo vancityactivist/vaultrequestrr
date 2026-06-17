@@ -148,3 +148,41 @@ async def test_persists_across_reconnect(tmp_path):
     link = await s2.get("123")
     await s2.close()
     assert link is not None and link.seerr_user_id == 42
+
+
+@pytest.mark.asyncio
+async def test_arr_instance_crud(store):
+    inst = await store.add_arr_instance(
+        kind="radarr", label="Radarr", base_url="http://r:7878", api_key="k",
+    )
+    assert inst.id and inst.is_default is False
+    fetched = await store.get_arr_instance(inst.id)
+    assert fetched is not None and fetched.base_url == "http://r:7878"
+
+    await store.update_arr_instance(
+        inst.id, label="Radarr HD", base_url="http://r:7878", api_key="k2", is_4k=True,
+    )
+    updated = await store.get_arr_instance(inst.id)
+    assert updated.label == "Radarr HD" and updated.api_key == "k2" and updated.is_4k
+
+    await store.delete_arr_instance(inst.id)
+    assert await store.get_arr_instance(inst.id) is None
+
+
+@pytest.mark.asyncio
+async def test_arr_default_is_unique_per_kind(store):
+    a = await store.add_arr_instance(
+        kind="radarr", label="HD", base_url="http://a", api_key="k", is_default=True,
+    )
+    b = await store.add_arr_instance(
+        kind="radarr", label="4K", base_url="http://b", api_key="k", is_4k=True, is_default=True,
+    )
+    # Sonarr default is independent of Radarr's.
+    s = await store.add_arr_instance(
+        kind="sonarr", label="Sonarr", base_url="http://s", api_key="k", is_default=True,
+    )
+    radarrs = {i.label: i.is_default for i in await store.list_arr_instances("radarr")}
+    assert radarrs == {"HD": False, "4K": True}  # newest default wins
+    assert (await store.get_arr_instance(s.id)).is_default is True
+    assert len(await store.list_arr_instances()) == 3
+    assert len(await store.list_arr_instances("sonarr")) == 1

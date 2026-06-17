@@ -59,6 +59,17 @@ CREATE TABLE IF NOT EXISTS invites (
     status              TEXT NOT NULL,
     created_at          TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS arr_instances (
+    id          TEXT PRIMARY KEY,
+    kind        TEXT NOT NULL,            -- 'radarr' | 'sonarr'
+    label       TEXT NOT NULL,
+    base_url    TEXT NOT NULL,
+    api_key     TEXT NOT NULL,
+    is_4k       INTEGER NOT NULL DEFAULT 0,
+    is_default  INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL
+);
 """
 
 # Columns added after the table first shipped; applied idempotently on connect.
@@ -123,6 +134,19 @@ class InviteRecord:
     inviter_discord_id: str
     invited_email: str
     status: str
+    created_at: str
+
+
+@dataclass(frozen=True)
+class ArrInstance:
+    """A VaultRequestrr-owned Radarr/Sonarr connection (creds we manage)."""
+    id: str
+    kind: str  # "radarr" or "sonarr"
+    label: str
+    base_url: str
+    api_key: str
+    is_4k: bool
+    is_default: bool
     created_at: str
 
 
@@ -438,6 +462,93 @@ class LinkStore:
         )
         await self._conn.commit()
 
+    # -- Radarr/Sonarr instances (VaultRequestrr-owned connections) --------
+
+    async def list_arr_instances(self, kind: str | None = None) -> list[ArrInstance]:
+        if kind:
+            sql = "SELECT * FROM arr_instances WHERE kind = ? ORDER BY label"
+            args: tuple[object, ...] = (kind,)
+        else:
+            sql = "SELECT * FROM arr_instances ORDER BY kind, label"
+            args = ()
+        async with self._conn.execute(sql, args) as cursor:
+            rows = await cursor.fetchall()
+        return [_row_to_arr(row) for row in rows]
+
+    async def get_arr_instance(self, instance_id: str) -> ArrInstance | None:
+        async with self._conn.execute(
+            "SELECT * FROM arr_instances WHERE id = ?", (instance_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+        return _row_to_arr(row) if row else None
+
+    async def add_arr_instance(
+        self,
+        *,
+        kind: str,
+        label: str,
+        base_url: str,
+        api_key: str,
+        is_4k: bool = False,
+        is_default: bool = False,
+    ) -> ArrInstance:
+        import uuid
+
+        instance_id = str(uuid.uuid4())
+        created_at = datetime.now(timezone.utc).isoformat()
+        if is_default:
+            await self._clear_default(kind)
+        await self._conn.execute(
+            """
+            INSERT INTO arr_instances
+                (id, kind, label, base_url, api_key, is_4k, is_default, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (instance_id, kind, label, base_url, api_key,
+             1 if is_4k else 0, 1 if is_default else 0, created_at),
+        )
+        await self._conn.commit()
+        return ArrInstance(
+            instance_id, kind, label, base_url, api_key, is_4k, is_default, created_at
+        )
+
+    async def update_arr_instance(
+        self,
+        instance_id: str,
+        *,
+        label: str,
+        base_url: str,
+        api_key: str,
+        is_4k: bool = False,
+        is_default: bool = False,
+    ) -> None:
+        existing = await self.get_arr_instance(instance_id)
+        if existing is None:
+            return
+        if is_default:
+            await self._clear_default(existing.kind)
+        await self._conn.execute(
+            """
+            UPDATE arr_instances
+            SET label = ?, base_url = ?, api_key = ?, is_4k = ?, is_default = ?
+            WHERE id = ?
+            """,
+            (label, base_url, api_key, 1 if is_4k else 0,
+             1 if is_default else 0, instance_id),
+        )
+        await self._conn.commit()
+
+    async def delete_arr_instance(self, instance_id: str) -> None:
+        await self._conn.execute(
+            "DELETE FROM arr_instances WHERE id = ?", (instance_id,)
+        )
+        await self._conn.commit()
+
+    async def _clear_default(self, kind: str) -> None:
+        await self._conn.execute(
+            "UPDATE arr_instances SET is_default = 0 WHERE kind = ?", (kind,)
+        )
+
 
 def _row_to_tracked(row: aiosqlite.Row) -> TrackedRequest:
     return TrackedRequest(
@@ -480,6 +591,19 @@ def _row_to_invite(row: aiosqlite.Row) -> InviteRecord:
         inviter_discord_id=row["inviter_discord_id"],
         invited_email=row["invited_email"],
         status=row["status"],
+        created_at=row["created_at"],
+    )
+
+
+def _row_to_arr(row: aiosqlite.Row) -> ArrInstance:
+    return ArrInstance(
+        id=row["id"],
+        kind=row["kind"],
+        label=row["label"],
+        base_url=row["base_url"],
+        api_key=row["api_key"],
+        is_4k=bool(row["is_4k"]),
+        is_default=bool(row["is_default"]),
         created_at=row["created_at"],
     )
 

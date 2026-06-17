@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
+from vaultrequestrr.arr import ArrManager
 from vaultrequestrr.linking import AccountLinker
 from vaultrequestrr.store import LinkStore
 from vaultrequestrr.web import WebDashboard
@@ -27,9 +28,6 @@ class FakeSeerr:
     async def get_media_service(self, media_type, tmdb_id):
         return 0, 110
 
-    async def get_arr_config(self, media_type, service_id):
-        return "http://radarr:7878", "key"
-
 
 class FakePlex:
     async def list_libraries(self):
@@ -46,6 +44,7 @@ class FakeBot:
         self.store = store
         self.seerr = FakeSeerr()
         self.linker = AccountLinker(self.seerr, store)
+        self.arr = ArrManager(self)
         self.config = SimpleNamespace(
             web_password="secret",
             web_port=5056,
@@ -178,11 +177,11 @@ async def test_issue_research_action_invokes_arr(client, monkeypatch):
 
     calls = []
 
-    async def fake_research(seerr, media_type, tmdb_id, *, season=None, episode=None):
+    async def fake_research(media_type, tmdb_id, *, season=None, episode=None):
         calls.append((media_type, tmdb_id, season, episode))
         return "Deleted the current file and started a new search."
 
-    monkeypatch.setattr("vaultrequestrr.web.research_media", fake_research)
+    monkeypatch.setattr(_dash.bot.arr, "research", fake_research)
 
     resp = await cli.post(
         "/issues/research", data={"issue_id": "5"}, allow_redirects=False
@@ -198,8 +197,60 @@ async def test_settings_page_renders(client):
     page = await cli.get("/settings")
     body = await page.text()
     assert page.status == 200
-    assert "Seerr connection" in body and "Bot settings" in body and "Download managers" in body
+    assert "Seerr connection" in body and "Bot settings" in body
+    assert "Radarr / Sonarr connections" in body  # editable arr manager
     assert "http://seerr:5055" in body  # current URL pre-filled
+
+
+@pytest.mark.asyncio
+async def test_arr_add_and_delete(client, monkeypatch):
+    cli, store, dash = client
+    await cli.post("/login", data={"password": "secret"})
+
+    async def ok_probe(base_url, api_key):
+        return None
+
+    monkeypatch.setattr(dash, "_probe_arr", staticmethod(ok_probe))
+
+    resp = await cli.post(
+        "/settings/arr/add",
+        data={"kind": "radarr", "label": "Radarr 4K", "base_url": "http://r:7878/",
+              "api_key": "abc", "is_4k": "on", "is_default": "on"},
+        allow_redirects=False,
+    )
+    assert resp.status == 302
+    instances = await store.list_arr_instances()
+    assert len(instances) == 1
+    inst = instances[0]
+    assert inst.label == "Radarr 4K" and inst.is_4k and inst.is_default
+    assert inst.base_url == "http://r:7878"  # trailing slash trimmed
+
+    resp = await cli.post(
+        "/settings/arr/delete", data={"id": inst.id}, allow_redirects=False
+    )
+    assert resp.status == 302
+    assert await store.list_arr_instances() == []
+
+
+@pytest.mark.asyncio
+async def test_arr_add_rejects_unreachable(client, monkeypatch):
+    cli, store, dash = client
+    await cli.post("/login", data={"password": "secret"})
+
+    from vaultrequestrr.arr import ArrError
+
+    async def bad_probe(base_url, api_key):
+        raise ArrError("connection refused")
+
+    monkeypatch.setattr(dash, "_probe_arr", staticmethod(bad_probe))
+
+    resp = await cli.post(
+        "/settings/arr/add",
+        data={"kind": "radarr", "label": "Bad", "base_url": "http://x", "api_key": "k"},
+        allow_redirects=False,
+    )
+    assert resp.status == 302 and "couldn" in resp.headers["Location"].lower()
+    assert await store.list_arr_instances() == []  # not persisted
 
 
 class _FakeProbe:
@@ -469,3 +520,100 @@ async def test_dashboard_shows_plex_status(client):
     body = await (await cli.get("/")).text()
     assert "Plex" in body and "Not connected" in body
     assert "Invites sent" in body
+
+
+@pytest.mark.asyncio
+async def test_media_page_renders_detail(client, monkeypatch):
+    cli, store, dash = client
+    await cli.post("/login", data={"password": "secret"})
+
+    from vaultrequestrr.store import ArrInstance
+
+    inst = ArrInstance("a", "radarr", "Radarr 4K", "http://r", "k", True, True, "now")
+
+    async def fake_detail(media_type, tmdb_id, *, season=None, episode=None):
+        return {
+            "instance": inst, "media_type": media_type, "tmdb_id": tmdb_id,
+            "external_id": 110, "episode_id": None, "season": season, "episode": episode,
+            "title": "The Matrix", "monitored": True, "has_file": True,
+            "quality": "Bluray-1080p", "size": 8_000_000_000, "languages": ["English"],
+            "queue": [{"title": "rel", "status": "downloading", "progress": 42, "timeleft": "1h"}],
+        }
+
+    monkeypatch.setattr(dash.bot.arr, "media_detail", fake_detail)
+
+    page = await cli.get("/media?type=movie&tmdb=603")
+    body = await page.text()
+    assert page.status == 200
+    assert "The Matrix" in body and "Bluray-1080p" in body
+    assert "Radarr 4K" in body and "7.5 GB" in body  # size formatted
+    assert "42%" in body  # queue progress
+
+
+@pytest.mark.asyncio
+async def test_media_page_handles_no_instance(client):
+    # The real ArrManager runs: with no configured instances it raises ArrError,
+    # which the page renders as a friendly message instead of 500ing.
+    cli, _store, _dash = client
+    await cli.post("/login", data={"password": "secret"})
+    page = await cli.get("/media?type=movie&tmdb=603")
+    assert page.status == 200
+    assert "Radarr" in await page.text()
+
+
+@pytest.mark.asyncio
+async def test_media_research_action(client, monkeypatch):
+    cli, _store, dash = client
+    await cli.post("/login", data={"password": "secret"})
+
+    calls = []
+
+    async def fake_research(media_type, tmdb_id, *, season=None, episode=None):
+        calls.append((media_type, tmdb_id, season, episode))
+        return "Deleted the current file and started a new search."
+
+    monkeypatch.setattr(dash.bot.arr, "research", fake_research)
+    resp = await cli.post(
+        "/media/research",
+        data={"type": "tv", "tmdb": "95396", "season": "1", "episode": "2"},
+        allow_redirects=False,
+    )
+    assert resp.status == 302
+    loc = resp.headers["Location"]
+    assert loc.startswith("/media?") and "tmdb=95396" in loc
+    assert calls == [("tv", 95396, 1, 2)]
+
+
+@pytest.mark.asyncio
+async def test_media_search_and_grab(client, monkeypatch):
+    cli, _store, dash = client
+    await cli.post("/login", data={"password": "secret"})
+
+    async def fake_releases(media_type, tmdb_id, *, season=None, episode=None):
+        return [
+            {"guid": "g1", "indexer_id": 7, "title": "Matrix.2160p.BluRay",
+             "quality": "Bluray-2160p", "size": 50_000_000_000, "seeders": 42,
+             "indexer": "MyTracker", "protocol": "torrent"},
+        ]
+
+    monkeypatch.setattr(dash.bot.arr, "releases", fake_releases)
+
+    page = await cli.get("/media/search?type=movie&tmdb=603")
+    body = await page.text()
+    assert page.status == 200
+    assert "Matrix.2160p.BluRay" in body and "MyTracker" in body and "42" in body
+    assert 'name="guid" value="g1"' in body  # grab form wired
+
+    grabbed = []
+
+    async def fake_grab(media_type, tmdb_id, guid, indexer_id):
+        grabbed.append((media_type, tmdb_id, guid, indexer_id))
+
+    monkeypatch.setattr(dash.bot.arr, "grab", fake_grab)
+    resp = await cli.post(
+        "/media/grab",
+        data={"type": "movie", "tmdb": "603", "guid": "g1", "indexer_id": "7"},
+        allow_redirects=False,
+    )
+    assert resp.status == 302 and resp.headers["Location"].startswith("/media?")
+    assert grabbed == [("movie", 603, "g1", 7)]

@@ -76,16 +76,25 @@ connection is validated before saving, applied immediately without a restart,
 and persisted to the database (the `SEERR_URL` / `SEERR_API_KEY` env vars are
 only the first-run default). It also exposes the bot behaviour toggles, a
 **Plex Invites** section (Login with Plex, server + library selection, enable
-toggle and per-user invite cap), and a read-only view of the Radarr/Sonarr
-instances Seerr is wired to.
+toggle and per-user invite cap), and a **Radarr / Sonarr connections** manager.
 
-**Re-search** lets an admin act on a bad download straight from an issue: it
-deletes the current file in Radarr/Sonarr and triggers a fresh search for a
-replacement — for a movie, the movie file; for TV, just the reported episode's
-file. (Radarr/Sonarr can't "blocklist but keep the file" for an already-imported
-release, so removing the file is what reliably forces a new grab.) No extra
-configuration is needed — the Radarr/Sonarr connection details are read from
-Seerr's own settings at the time of the action.
+VaultRequestrr talks to Radarr/Sonarr **directly with its own credentials**.
+Add one or more instances (URL + API key, with optional 4K and default flags)
+on the Settings page — each is validated before saving and stored in the
+database. Seerr is still used to *locate* which instance holds a given title
+(it resolves the internal movie/series id), but all data reads and actions run
+against your configured connections. This unlocks richer media tooling:
+
+* **Media details** — from an issue's **Details** action, see the current file's
+  quality/size/languages, monitored state, and live download-queue progress,
+  read straight from the arr.
+* **Re-search** acts on a bad download: it deletes the current file in
+  Radarr/Sonarr and triggers a fresh search for a replacement — for a movie, the
+  movie file; for TV, just the reported episode's file. (Radarr/Sonarr can't
+  "blocklist but keep the file" for an already-imported release, so removing the
+  file is what reliably forces a new grab.)
+* **Manual search** — run an interactive indexer search and **grab a specific
+  release** from the candidate list, instead of relying on auto-search.
 
 Commands:
 

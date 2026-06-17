@@ -14,7 +14,7 @@ from datetime import datetime
 
 from aiohttp import web
 
-from .arr import ArrError, research_media
+from .arr import ArrClient, ArrError
 from .linking import LinkStatus
 from .logbuffer import get_records
 from .plex import PlexAuth, PlexError
@@ -61,10 +61,17 @@ class WebDashboard:
                 web.post("/issues/resolve", self.issue_resolve_action),
                 web.post("/issues/reopen", self.issue_reopen_action),
                 web.post("/issues/research", self.issue_research_action),
+                web.get("/media", self.media_page),
+                web.post("/media/research", self.media_research_action),
+                web.get("/media/search", self.media_search_page),
+                web.post("/media/grab", self.media_grab_action),
                 web.get("/logs", self.logs_page),
                 web.get("/settings", self.settings_page),
                 web.post("/settings", self.settings_action),
                 web.post("/settings/connection", self.connection_action),
+                web.post("/settings/arr/add", self.arr_add_action),
+                web.post("/settings/arr/update", self.arr_update_action),
+                web.post("/settings/arr/delete", self.arr_delete_action),
                 web.post("/settings/plex/login", self.plex_login_action),
                 web.get("/settings/plex/poll", self.plex_poll_action),
                 web.post("/settings/plex/server", self.plex_server_action),
@@ -310,6 +317,12 @@ class WebDashboard:
             title = it.title or "—"
             if it.problem_season is not None and it.problem_episode is not None:
                 title += f" S{it.problem_season:02d}E{it.problem_episode:02d}"
+            details_link = ""
+            if it.tmdb_id and it.media_type:
+                href = f"/media?type={html.escape(it.media_type)}&tmdb={it.tmdb_id}"
+                if it.problem_season is not None and it.problem_episode is not None:
+                    href += f"&season={it.problem_season}&episode={it.problem_episode}"
+                details_link = f'<a class="btn ghost" href="{href}">Details</a>'
             rows += f"""
             <tr>
               <td>{html.escape(title)}</td>
@@ -318,6 +331,7 @@ class WebDashboard:
               <td>{badge}</td>
               <td>{html.escape((it.created_at or '')[:19])}</td>
               <td class="actions">
+                {details_link}
                 <form method="post" action="/issues/{action}">
                   <input type="hidden" name="issue_id" value="{it.issue_id}">
                   <button>{action_label}</button>
@@ -400,35 +414,7 @@ class WebDashboard:
         )
         key_placeholder = "•••••••• (unchanged — leave blank to keep)" if key_set else "Seerr API key"
 
-        # Read-only view of the download managers Seerr already knows about.
-        arr_rows = ""
-        try:
-            instances = []
-            for kind in ("radarr", "sonarr"):
-                instances.extend(await self.bot.seerr.list_service_instances(kind))
-            for inst in instances:
-                tags = []
-                if inst.is_default:
-                    tags.append('<span class="badge ok">default</span>')
-                if inst.is_4k:
-                    tags.append('<span class="badge pend">4K</span>')
-                arr_rows += f"""
-                <tr>
-                  <td>{html.escape((inst.kind or '').title())}</td>
-                  <td>{html.escape(inst.name or '—')}</td>
-                  <td><code>{html.escape(inst.url)}</code></td>
-                  <td>{html.escape(inst.profile or '—')}</td>
-                  <td>{' '.join(tags)}</td>
-                </tr>"""
-            arr_note = (
-                '<tr><td colspan="5" class="muted">Seerr has no Radarr/Sonarr configured.</td></tr>'
-                if not arr_rows
-                else ""
-            )
-        except SeerrError as exc:
-            arr_rows = ""
-            arr_note = f'<tr><td colspan="5" class="muted">Couldn\'t reach Seerr: {html.escape(str(exc))}</td></tr>'
-
+        arr_card = await self._arr_card()
         plex_card = await self._plex_card()
 
         body = f"""
@@ -466,17 +452,86 @@ class WebDashboard:
 
         {plex_card}
 
-        <div class="card">
-          <h2>Download managers <span class="muted small">(from Seerr — read only)</span></h2>
-          <table>
-            <thead><tr><th>Service</th><th>Name</th><th>URL</th><th>Profile</th><th></th></tr></thead>
-            <tbody>{arr_rows}{arr_note}</tbody>
-          </table>
-          <p class="muted small">Radarr/Sonarr are configured in Seerr; VaultRequestrr reads
-            them from there for the issue <strong>Re-search</strong> action.</p>
-        </div>
+        {arr_card}
         """
         return _html(_layout("Settings", body))
+
+    async def _arr_card(self) -> str:
+        """Editable Radarr/Sonarr connection manager (our own credentials)."""
+        instances = await self.bot.store.list_arr_instances()
+        rows = ""
+        for inst in instances:
+            flags = []
+            if inst.is_default:
+                flags.append('<span class="badge ok">default</span>')
+            if inst.is_4k:
+                flags.append('<span class="badge pend">4K</span>')
+            rows += f"""
+            <tr>
+              <td>{html.escape(inst.label)}</td>
+              <td>{html.escape(inst.kind.title())}</td>
+              <td><code>{html.escape(inst.base_url)}</code></td>
+              <td>{' '.join(flags) or '<span class="muted small">—</span>'}</td>
+              <td class="actions">
+                <details class="editbox">
+                  <summary class="chip">Edit</summary>
+                  <form method="post" action="/settings/arr/update" class="arrform">
+                    <input type="hidden" name="id" value="{html.escape(inst.id)}">
+                    <label class="field">Label
+                      <input type="text" name="label" value="{html.escape(inst.label)}" required>
+                    </label>
+                    <label class="field">URL
+                      <input type="text" name="base_url" value="{html.escape(inst.base_url)}" required>
+                    </label>
+                    <label class="field">API key
+                      <input type="password" name="api_key" placeholder="•••••••• (unchanged — leave blank to keep)" autocomplete="off">
+                    </label>
+                    <label class="check"><input type="checkbox" name="is_4k" {_checked(inst.is_4k)}> 4K instance</label>
+                    <label class="check"><input type="checkbox" name="is_default" {_checked(inst.is_default)}> Default {html.escape(inst.kind)}</label>
+                    <button type="submit">Test &amp; save</button>
+                  </form>
+                </details>
+                <form method="post" action="/settings/arr/delete" onsubmit="return confirm('Delete this connection?')">
+                  <input type="hidden" name="id" value="{html.escape(inst.id)}">
+                  <button class="danger">Delete</button>
+                </form>
+              </td>
+            </tr>"""
+        if not instances:
+            rows = _empty_row(5, "No Radarr/Sonarr connections yet — add one below.", "server")
+
+        return f"""
+        <div class="card">
+          <h2>Radarr / Sonarr connections</h2>
+          <p class="muted small">VaultRequestrr talks to these directly with its own
+            credentials for re-search, media details, and manual search. Seerr is only
+            used to locate which instance holds a title.</p>
+          <table>
+            <thead><tr><th>Label</th><th>Type</th><th>URL</th><th>Flags</th><th>Actions</th></tr></thead>
+            <tbody>{rows}</tbody>
+          </table>
+          <h3 class="subhead">Add a connection</h3>
+          <form method="post" action="/settings/arr/add" class="arrform">
+            <div class="formrow">
+              <label class="field">Type
+                <select name="kind"><option value="radarr">Radarr</option><option value="sonarr">Sonarr</option></select>
+              </label>
+              <label class="field">Label
+                <input type="text" name="label" placeholder="e.g. Radarr 4K" required>
+              </label>
+            </div>
+            <label class="field">URL
+              <input type="text" name="base_url" placeholder="http://host:7878" required>
+            </label>
+            <label class="field">API key
+              <input type="password" name="api_key" placeholder="Radarr/Sonarr API key" autocomplete="off" required>
+            </label>
+            <label class="check"><input type="checkbox" name="is_4k"> 4K instance</label>
+            <label class="check"><input type="checkbox" name="is_default"> Default for this type</label>
+            <button type="submit">Test &amp; add</button>
+          </form>
+        </div>
+        """
 
     # -- actions -----------------------------------------------------------
 
@@ -544,16 +599,210 @@ class WebDashboard:
         if tracked is None or tracked.tmdb_id is None or not tracked.media_type:
             raise web.HTTPFound("/issues?msg=" + _q("Can't re-search this issue."))
         try:
-            result = await research_media(
-                self.bot.seerr,
+            result = await self.bot.arr.research(
                 tracked.media_type,
                 tracked.tmdb_id,
                 season=tracked.problem_season,
                 episode=tracked.problem_episode,
             )
-        except ArrError as exc:
+        except (ArrError, SeerrError) as exc:
             raise web.HTTPFound("/issues?msg=" + _q(str(exc)))
         raise web.HTTPFound("/issues?msg=" + _q(result))
+
+    # -- media detail (direct Radarr/Sonarr view) --------------------------
+
+    @staticmethod
+    def _media_query(media_type: str, tmdb_id: int,
+                     season: int | None, episode: int | None) -> str:
+        q = f"type={media_type}&tmdb={tmdb_id}"
+        if season is not None and episode is not None:
+            q += f"&season={season}&episode={episode}"
+        return q
+
+    async def media_page(self, request: web.Request) -> web.Response:
+        media_type = request.query.get("type", "")
+        try:
+            tmdb_id = int(request.query.get("tmdb", ""))
+        except ValueError:
+            raise web.HTTPFound("/issues?msg=" + _q("Missing media id."))
+        if media_type not in ("movie", "tv"):
+            raise web.HTTPFound("/issues?msg=" + _q("Unknown media type."))
+        season = _opt_int(request.query.get("season"))
+        episode = _opt_int(request.query.get("episode"))
+        try:
+            detail = await self.bot.arr.media_detail(
+                media_type, tmdb_id, season=season, episode=episode
+            )
+        except (ArrError, SeerrError) as exc:
+            body = (
+                f'{_flash(request)}<div class="card"><h2>Media</h2>'
+                f'<p class="muted">{html.escape(str(exc))}</p>'
+                '<a class="btn ghost" href="/issues">Back to issues</a></div>'
+            )
+            return _html(_layout("Media", body))
+        return _html(_layout("Media", self._render_media(request, detail)))
+
+    def _render_media(self, request: web.Request, d: dict) -> str:
+        inst = d["instance"]
+        flag = ' <span class="badge pend">4K</span>' if inst.is_4k else ""
+        mono = (
+            '<span class="badge ok">Monitored</span>' if d["monitored"]
+            else '<span class="badge pend">Unmonitored</span>'
+        )
+        sub = f' · S{d["season"]:02d}E{d["episode"]:02d}' if d["episode"] else ""
+
+        if d["has_file"]:
+            langs = ", ".join(d["languages"]) or "—"
+            file_html = f"""
+            <div class="grid">
+              <div class="card stat"><div class="num">{html.escape(d["quality"] or "—")}</div><div class="muted">Quality</div></div>
+              <div class="card stat"><div class="num">{_fmt_size(d["size"])}</div><div class="muted">Size on disk</div></div>
+              <div class="card stat"><div class="num small">{html.escape(langs)}</div><div class="muted">Languages</div></div>
+            </div>"""
+        else:
+            file_html = '<p class="muted">No file on disk yet.</p>'
+
+        if d["queue"]:
+            qrows = ""
+            for q in d["queue"]:
+                prog = f'{q["progress"]}%' if q["progress"] is not None else "—"
+                qrows += (
+                    f'<tr><td>{html.escape(q["title"] or "—")}</td>'
+                    f'<td>{html.escape(str(q["status"] or "—"))}</td>'
+                    f'<td>{prog}</td><td>{html.escape(str(q["timeleft"] or "—"))}</td></tr>'
+                )
+            queue_html = (
+                '<table><thead><tr><th>Release</th><th>Status</th><th>Progress</th>'
+                f'<th>Time left</th></tr></thead><tbody>{qrows}</tbody></table>'
+            )
+        else:
+            queue_html = '<p class="muted small">Nothing downloading right now.</p>'
+
+        season_episode = _hidden_se(d["season"], d["episode"])
+
+        return f"""
+        {_flash(request)}
+        <div class="card">
+          <h2>{html.escape(d["title"] or "—")}{sub}</h2>
+          <p class="muted small">Managed by <strong>{html.escape(inst.label)}</strong>{flag} · {mono}</p>
+          {file_html}
+        </div>
+        <div class="card">
+          <h2>Download queue</h2>
+          {queue_html}
+        </div>
+        <div class="card">
+          <h2>Actions</h2>
+          <div class="actions">
+            <form method="post" action="/media/research" onsubmit="return confirm('Delete the current file and search for a replacement?')">
+              <input type="hidden" name="type" value="{html.escape(d["media_type"])}">
+              <input type="hidden" name="tmdb" value="{d["tmdb_id"]}">
+              {season_episode}
+              <button class="warn">Delete &amp; auto-search</button>
+            </form>
+            <a class="btn" href="/media/search?{self._media_query(d["media_type"], d["tmdb_id"], d["season"], d["episode"])}">Manual search</a>
+            <a class="btn ghost" href="/issues">Back to issues</a>
+          </div>
+        </div>
+        """
+
+    async def media_research_action(self, request: web.Request) -> web.Response:
+        data = await request.post()
+        media_type = str(data.get("type", ""))
+        try:
+            tmdb_id = int(str(data.get("tmdb", "")))
+        except ValueError:
+            raise web.HTTPFound("/issues?msg=" + _q("Missing media id."))
+        season = _opt_int(data.get("season"))
+        episode = _opt_int(data.get("episode"))
+        back = "/media?" + self._media_query(media_type, tmdb_id, season, episode)
+        try:
+            result = await self.bot.arr.research(
+                media_type, tmdb_id, season=season, episode=episode
+            )
+        except (ArrError, SeerrError) as exc:
+            raise web.HTTPFound(back + "&msg=" + _q(str(exc)))
+        raise web.HTTPFound(back + "&msg=" + _q(result))
+
+    async def media_search_page(self, request: web.Request) -> web.Response:
+        media_type = request.query.get("type", "")
+        try:
+            tmdb_id = int(request.query.get("tmdb", ""))
+        except ValueError:
+            raise web.HTTPFound("/issues?msg=" + _q("Missing media id."))
+        season = _opt_int(request.query.get("season"))
+        episode = _opt_int(request.query.get("episode"))
+        back = "/media?" + self._media_query(media_type, tmdb_id, season, episode)
+        try:
+            releases = await self.bot.arr.releases(
+                media_type, tmdb_id, season=season, episode=episode
+            )
+        except (ArrError, SeerrError) as exc:
+            body = (
+                f'<div class="card"><h2>Manual search</h2>'
+                f'<p class="muted">{html.escape(str(exc))}</p>'
+                f'<a class="btn ghost" href="{back}">Back</a></div>'
+            )
+            return _html(_layout("Manual search", body))
+
+        rows = ""
+        for r in releases:
+            seeders = "—" if r["seeders"] is None else str(r["seeders"])
+            grab = ""
+            if r["guid"] and r["indexer_id"] is not None:
+                grab = f"""
+                <form method="post" action="/media/grab">
+                  <input type="hidden" name="type" value="{html.escape(media_type)}">
+                  <input type="hidden" name="tmdb" value="{tmdb_id}">
+                  {_hidden_se(season, episode)}
+                  <input type="hidden" name="guid" value="{html.escape(str(r['guid']))}">
+                  <input type="hidden" name="indexer_id" value="{r['indexer_id']}">
+                  <button>Grab</button>
+                </form>"""
+            rows += f"""
+            <tr>
+              <td>{html.escape(r["title"] or "—")}</td>
+              <td>{html.escape(r["quality"] or "—")}</td>
+              <td>{_fmt_size(r["size"])}</td>
+              <td>{seeders}</td>
+              <td>{html.escape(r["indexer"] or "—")}</td>
+              <td class="actions">{grab}</td>
+            </tr>"""
+        if not releases:
+            rows = _empty_row(6, "No releases found.", "logs")
+
+        body = f"""
+        {_flash(request)}
+        <div class="card">
+          <h2>Manual search <span class="muted small">({len(releases)} releases)</span></h2>
+          <table>
+            <thead><tr><th>Release</th><th>Quality</th><th>Size</th><th>Seeders</th><th>Indexer</th><th></th></tr></thead>
+            <tbody>{rows}</tbody>
+          </table>
+          <p style="margin-top:14px"><a class="btn ghost" href="{back}">Back to media</a></p>
+        </div>
+        """
+        return _html(_layout("Manual search", body))
+
+    async def media_grab_action(self, request: web.Request) -> web.Response:
+        data = await request.post()
+        media_type = str(data.get("type", ""))
+        try:
+            tmdb_id = int(str(data.get("tmdb", "")))
+        except ValueError:
+            raise web.HTTPFound("/issues?msg=" + _q("Missing media id."))
+        season = _opt_int(data.get("season"))
+        episode = _opt_int(data.get("episode"))
+        guid = str(data.get("guid", ""))
+        indexer_id = _opt_int(data.get("indexer_id"))
+        back = "/media?" + self._media_query(media_type, tmdb_id, season, episode)
+        if not guid or indexer_id is None:
+            raise web.HTTPFound(back + "&msg=" + _q("Missing release."))
+        try:
+            await self.bot.arr.grab(media_type, tmdb_id, guid, indexer_id)
+        except (ArrError, SeerrError) as exc:
+            raise web.HTTPFound(back + "&msg=" + _q(str(exc)))
+        raise web.HTTPFound(back + "&msg=" + _q("Release sent to the download client."))
 
     async def connection_action(self, request: web.Request) -> web.Response:
         data = await request.post()
@@ -583,6 +832,61 @@ class WebDashboard:
             await self.bot.store.set_setting("seerr_api_key", new_key)
         await self.bot.apply_seerr_connection(url, effective_key)
         raise web.HTTPFound("/settings?msg=" + _q("Seerr connection saved."))
+
+    # -- Radarr/Sonarr connections -----------------------------------------
+
+    @staticmethod
+    async def _probe_arr(base_url: str, api_key: str) -> None:
+        """Validate an arr connection; raises ArrError if unreachable/unauthorised."""
+        probe = ArrClient(base_url, api_key)
+        try:
+            await probe.system_status()
+        finally:
+            await probe.aclose()
+
+    async def arr_add_action(self, request: web.Request) -> web.Response:
+        data = await request.post()
+        kind = str(data.get("kind", "")).strip().lower()
+        label = str(data.get("label", "")).strip()
+        base_url = str(data.get("base_url", "")).strip().rstrip("/")
+        api_key = str(data.get("api_key", "")).strip()
+        if kind not in ("radarr", "sonarr") or not (label and base_url and api_key):
+            raise web.HTTPFound("/settings?msg=" + _q("Type, label, URL and API key are required."))
+        try:
+            await self._probe_arr(base_url, api_key)
+        except ArrError as exc:
+            raise web.HTTPFound("/settings?msg=" + _q(f"Couldn't connect: {exc}"))
+        await self.bot.store.add_arr_instance(
+            kind=kind, label=label, base_url=base_url, api_key=api_key,
+            is_4k="is_4k" in data, is_default="is_default" in data,
+        )
+        raise web.HTTPFound("/settings?msg=" + _q(f"{label} added."))
+
+    async def arr_update_action(self, request: web.Request) -> web.Response:
+        data = await request.post()
+        instance_id = str(data.get("id", ""))
+        existing = await self.bot.store.get_arr_instance(instance_id)
+        if existing is None:
+            raise web.HTTPFound("/settings?msg=" + _q("No such connection."))
+        label = str(data.get("label", "")).strip() or existing.label
+        base_url = str(data.get("base_url", "")).strip().rstrip("/") or existing.base_url
+        # Blank key field => keep the current key.
+        api_key = str(data.get("api_key", "")).strip() or existing.api_key
+        try:
+            await self._probe_arr(base_url, api_key)
+        except ArrError as exc:
+            raise web.HTTPFound("/settings?msg=" + _q(f"Couldn't connect: {exc}"))
+        await self.bot.store.update_arr_instance(
+            instance_id, label=label, base_url=base_url, api_key=api_key,
+            is_4k="is_4k" in data, is_default="is_default" in data,
+        )
+        raise web.HTTPFound("/settings?msg=" + _q(f"{label} saved."))
+
+    async def arr_delete_action(self, request: web.Request) -> web.Response:
+        data = await request.post()
+        instance_id = str(data.get("id", ""))
+        await self.bot.store.delete_arr_instance(instance_id)
+        raise web.HTTPFound("/settings?msg=" + _q("Connection deleted."))
 
     # -- Plex invites ------------------------------------------------------
 
@@ -928,13 +1232,14 @@ tr.empty:hover{background:transparent}
 .emptybox .ic{opacity:.6}
 
 /* Buttons + inputs */
-button{background:var(--accent);color:#fff;border:0;border-radius:var(--radius-sm);
-  padding:9px 15px;cursor:pointer;font-size:13.5px;font-weight:600;font-family:inherit;
-  transition:filter .15s,background .15s}
-button:hover{filter:brightness(1.08)}button:active{filter:brightness(.94)}
-button.danger{background:var(--bad)}button.warn{background:var(--warn);color:#1c1403}
-button.ghost{background:transparent;border:1px solid var(--line);color:var(--fg)}
-button.ghost:hover{border-color:var(--accent);background:var(--accent-soft);filter:none}
+button,.btn{display:inline-flex;align-items:center;gap:6px;background:var(--accent);color:#fff;
+  border:0;border-radius:var(--radius-sm);padding:9px 15px;cursor:pointer;font-size:13.5px;
+  font-weight:600;font-family:inherit;text-decoration:none;transition:filter .15s,background .15s}
+button:hover,.btn:hover{filter:brightness(1.08)}button:active,.btn:active{filter:brightness(.94)}
+button.danger,.btn.danger{background:var(--bad)}
+button.warn,.btn.warn{background:var(--warn);color:#1c1403}
+button.ghost,.btn.ghost{background:transparent;border:1px solid var(--line);color:var(--fg)}
+button.ghost:hover,.btn.ghost:hover{border-color:var(--accent);background:var(--accent-soft);filter:none}
 input,select{background:#0a0c10;color:var(--fg);border:1px solid var(--line);
   border-radius:var(--radius-sm);padding:9px 11px;font-size:14px;font-family:inherit}
 input:focus,select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
@@ -944,6 +1249,14 @@ input[type=checkbox]{accent-color:var(--accent);width:16px;height:16px}
 label.check{display:flex;align-items:center;gap:9px;margin:10px 0;cursor:pointer}
 label.field{display:block;margin:14px 0;color:var(--muted);font-size:13px}
 label.field input,label.field select{display:block;margin-top:6px;width:100%;max-width:440px;color:var(--fg)}
+h3.subhead{margin:20px 0 4px;font-size:14px;font-weight:650}
+summary{cursor:pointer}
+details.editbox{display:inline-block}
+details.editbox>summary{list-style:none}
+details.editbox>summary::-webkit-details-marker{display:none}
+.arrform{margin-top:10px;max-width:460px}
+.arrform .formrow{display:flex;gap:12px;flex-wrap:wrap}
+.arrform .formrow .field{flex:1;min-width:150px;margin-top:0}
 
 /* Login */
 .login{max-width:360px;width:100%;text-align:center}
@@ -1063,3 +1376,30 @@ def _q(text: str) -> str:
     from urllib.parse import quote
 
     return quote(text)
+
+
+def _opt_int(value: object) -> int | None:
+    try:
+        return int(value) if value not in (None, "") else None  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _hidden_se(season: int | None, episode: int | None) -> str:
+    if season is None or episode is None:
+        return ""
+    return (
+        f'<input type="hidden" name="season" value="{season}">'
+        f'<input type="hidden" name="episode" value="{episode}">'
+    )
+
+
+def _fmt_size(num: int | None) -> str:
+    if not num:
+        return "—"
+    size = float(num)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
