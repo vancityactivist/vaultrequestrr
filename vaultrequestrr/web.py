@@ -156,12 +156,12 @@ class WebDashboard:
         body = f"""
         {msg}
         <div class="grid">
-          <div class="card stat"><div class="num">{len(links)}</div><div class="muted">Linked users</div></div>
-          <div class="card stat"><div class="num">{len(pending)}</div><div class="muted">Pending requests</div></div>
-          <div class="card stat"><div class="num">{invites_sent}</div><div class="muted"><a href="/invites">Invites sent</a></div></div>
-          <div class="card stat"><div class="num">{_dot(discord_ok)} Discord</div><div class="muted">{'Ready' if discord_ok else 'Connecting…'}</div></div>
-          <div class="card stat"><div class="num">{_dot(seerr_ok)} Seerr</div><div class="muted">{html.escape(seerr_msg)}</div></div>
-          <div class="card stat"><div class="num">{_dot(plex_ok)} Plex</div><div class="muted">{html.escape(plex_msg)}</div></div>
+          <div class="card stat"><span class="tileico">{_icon("users", 22)}</span><div class="num">{len(links)}</div><div class="muted">Linked users</div></div>
+          <div class="card stat"><span class="tileico">{_icon("clock", 22)}</span><div class="num">{len(pending)}</div><div class="muted">Pending requests</div></div>
+          <div class="card stat"><span class="tileico">{_icon("mail", 22)}</span><div class="num">{invites_sent}</div><div class="muted"><a href="/invites">Invites sent</a></div></div>
+          <div class="card stat"><span class="tileico">{_icon("server", 22)}</span><div class="num">{_dot(discord_ok)} Discord</div><div class="muted">{'Ready' if discord_ok else 'Connecting…'}</div></div>
+          <div class="card stat"><span class="tileico">{_icon("server", 22)}</span><div class="num">{_dot(seerr_ok)} Seerr</div><div class="muted">{html.escape(seerr_msg)}</div></div>
+          <div class="card stat"><span class="tileico">{_icon("server", 22)}</span><div class="num">{_dot(plex_ok)} Plex</div><div class="muted">{html.escape(plex_msg)}</div></div>
         </div>
         <p class="muted small">Manage the Seerr/Plex connections and bot behaviour on the
           <a href="/settings">Settings</a> page.</p>
@@ -204,7 +204,7 @@ class WebDashboard:
               </td>
             </tr>"""
         if not links:
-            rows = '<tr><td colspan="6" class="muted">No linked users yet.</td></tr>'
+            rows = _empty_row(6, "No linked users yet.", "link")
 
         body = f"""
         {_flash(request)}
@@ -233,7 +233,7 @@ class WebDashboard:
               <td>{html.escape((it.created_at or '')[:19])}</td>
             </tr>"""
         if not items:
-            rows = '<tr><td colspan="5" class="muted">No activity yet.</td></tr>'
+            rows = _empty_row(5, "No activity yet.", "activity")
         body = f"""
         <div class="card">
           <h2>Recent requests ({len(items)})</h2>
@@ -266,7 +266,7 @@ class WebDashboard:
               <td>{html.escape((it.created_at or '')[:19])}</td>
             </tr>"""
         if not items:
-            rows = '<tr><td colspan="4" class="muted">No invites sent yet.</td></tr>'
+            rows = _empty_row(4, "No invites sent yet.", "mail")
         body = f"""
         <div class="card">
           <h2>Plex invites ({len(items)})</h2>
@@ -329,7 +329,7 @@ class WebDashboard:
               </td>
             </tr>"""
         if not items:
-            rows = '<tr><td colspan="6" class="muted">No issues reported yet.</td></tr>'
+            rows = _empty_row(6, "No issues reported yet.", "issue")
 
         body = f"""
         {_flash(request)}
@@ -774,61 +774,220 @@ def _html(markup: str) -> web.Response:
     return web.Response(text=markup, content_type="text/html")
 
 
-def _layout(title: str, body: str, *, nav: bool = True) -> str:
-    navbar = (
-        """
-        <nav class="nav">
-          <a class="brand" href="/">VaultRequestrr</a>
-          <div class="links">
-            <a href="/">Dashboard</a><a href="/links">Links</a><a href="/activity">Activity</a><a href="/issues">Issues</a><a href="/invites">Invites</a><a href="/logs">Logs</a><a href="/settings">Settings</a>
-            <a href="/logout" class="muted">Sign out</a>
-          </div>
-        </nav>
-        """
-        if nav
-        else ""
+# Inline SVG path data (24x24 viewBox, stroke=currentColor) for nav + tiles.
+_ICON_PATHS = {
+    "home": '<path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/>',
+    "link": '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
+    "activity": '<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>',
+    "issue": '<path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>',
+    "mail": '<rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 5L2 7"/>',
+    "logs": '<line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>',
+    "settings": '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
+    "logout": '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>',
+    "menu": '<line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/>',
+    "users": '<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
+    "clock": '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
+    "server": '<rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/>',
+}
+
+# Sidebar nav: (href, label, icon). `label` doubles as the active-state key —
+# it matches the `title` each page handler already passes to _layout().
+_NAV = [
+    ("/", "Dashboard", "home"),
+    ("/links", "Links", "link"),
+    ("/activity", "Activity", "activity"),
+    ("/issues", "Issues", "issue"),
+    ("/invites", "Invites", "mail"),
+    ("/logs", "Logs", "logs"),
+    ("/settings", "Settings", "settings"),
+]
+
+_FAVICON = (
+    "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'>"
+    "<rect width='32' height='32' rx='7' fill='%235865f2'/>"
+    "<path d='M12 9l9 7-9 7z' fill='%23fff'/></svg>"
+)
+
+
+def _icon(name: str, size: int = 18) -> str:
+    return (
+        f'<svg class="ic" width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" '
+        f'stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+        f'stroke-linejoin="round">{_ICON_PATHS.get(name, "")}</svg>'
     )
+
+
+def _empty_row(colspan: int, message: str, icon: str = "activity") -> str:
+    return (
+        f'<tr class="empty"><td colspan="{colspan}">'
+        f'<div class="emptybox">{_icon(icon, 22)}<span>{html.escape(message)}</span></div>'
+        f"</td></tr>"
+    )
+
+
+def _layout(title: str, body: str, *, nav: bool = True) -> str:
+    if nav:
+        items = ""
+        for href, label, icon in _NAV:
+            active = " active" if label == title else ""
+            items += f'<a class="navitem{active}" href="{href}">{_icon(icon)}<span>{label}</span></a>'
+        shell = f"""
+        <input type="checkbox" id="navtoggle" class="navtoggle" hidden>
+        <label for="navtoggle" class="scrim"></label>
+        <aside class="sidebar">
+          <a class="brand" href="/"><span class="logo"><svg viewBox="0 0 24 24" width="16" height="16" fill="#fff"><path d="M8 5v14l11-7z"/></svg></span>VaultRequestrr</a>
+          <nav class="navlist">{items}</nav>
+          <nav class="navlist foot"><a class="navitem" href="/logout">{_icon("logout")}<span>Sign out</span></a></nav>
+        </aside>
+        <div class="content">
+          <header class="topbar">
+            <label for="navtoggle" class="burger" aria-label="Toggle menu">{_icon("menu", 20)}</label>
+            <h1 class="page">{html.escape(title)}</h1>
+          </header>
+          <main>{body}</main>
+        </div>
+        """
+    else:
+        shell = f'<main class="solo">{body}</main>'
     return f"""<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="{_FAVICON}">
 <title>{html.escape(title)} · VaultRequestrr</title>
 <style>{_CSS}</style>
-</head><body>{navbar}<main>{body}</main></body></html>"""
+</head><body>{shell}</body></html>"""
 
 
 _CSS = """
-:root{--bg:#0f1115;--card:#1a1d24;--line:#2a2e38;--fg:#e6e8ee;--muted:#8b91a0;--accent:#5865f2;--ok:#3ba55d;--bad:#ed4245}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,Segoe UI,Roboto,sans-serif}
-main{max-width:980px;margin:0 auto;padding:24px}
-.nav{display:flex;justify-content:space-between;align-items:center;padding:14px 24px;background:var(--card);border-bottom:1px solid var(--line)}
-.nav .brand{font-weight:700;color:var(--fg);text-decoration:none}
-.nav .links a{color:var(--fg);text-decoration:none;margin-left:18px}.nav .links a:hover{color:var(--accent)}
-.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px;margin:16px 0}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;margin:16px 0}
-.stat .num{font-size:26px;font-weight:700}
+:root{
+  --bg:#0d0f13;--bg-elev:#15181f;--card:#1a1d24;--card-2:#1f232b;--line:#2a2e38;
+  --fg:#e6e8ee;--muted:#8b91a0;--accent:#5865f2;--accent-soft:rgba(88,101,242,.14);
+  --ok:#3ba55d;--bad:#ed4245;--warn:#e3a008;
+  --radius:14px;--radius-sm:9px;--shadow:0 1px 2px rgba(0,0,0,.3),0 10px 28px rgba(0,0,0,.18)
+}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:flex;background:var(--bg);color:var(--fg);
+  font:15px/1.6 system-ui,Segoe UI,Roboto,sans-serif;-webkit-font-smoothing:antialiased}
+a{color:inherit}
+.ic{flex:0 0 auto}
+
+/* Sidebar */
+.sidebar{width:236px;flex:0 0 236px;background:var(--bg-elev);border-right:1px solid var(--line);
+  display:flex;flex-direction:column;padding:16px 14px;position:sticky;top:0;height:100vh}
+.brand{display:flex;align-items:center;gap:11px;font-weight:700;font-size:16px;
+  text-decoration:none;color:var(--fg);padding:6px 8px 18px}
+.brand .logo{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;
+  border-radius:8px;background:var(--accent);box-shadow:0 4px 12px rgba(88,101,242,.35)}
+.navlist{display:flex;flex-direction:column;gap:2px}
+.navlist.foot{margin-top:auto;padding-top:10px;border-top:1px solid var(--line)}
+.navitem{display:flex;align-items:center;gap:11px;padding:10px 12px;border-radius:var(--radius-sm);
+  color:var(--muted);text-decoration:none;font-weight:500;font-size:14px;
+  border-left:2px solid transparent;transition:background .15s,color .15s}
+.navitem:hover{background:var(--card);color:var(--fg)}
+.navitem.active{background:var(--accent-soft);color:var(--fg);border-left-color:var(--accent)}
+.navitem.active .ic{color:var(--accent)}
+
+/* Content + topbar */
+.content{flex:1;min-width:0;display:flex;flex-direction:column}
+.topbar{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:14px;
+  padding:15px 28px;background:rgba(13,15,19,.82);backdrop-filter:blur(10px);
+  border-bottom:1px solid var(--line)}
+.topbar .page{margin:0;font-size:18px;font-weight:650}
+.burger{display:none;align-items:center;justify-content:center;width:36px;height:36px;
+  border-radius:var(--radius-sm);color:var(--fg);cursor:pointer}
+.burger:hover{background:var(--card)}
+.scrim{display:none}
+main{padding:24px 28px 48px;max-width:1180px;width:100%}
+main.solo{padding:0;max-width:none;display:flex;align-items:center;justify-content:center;min-height:100vh}
+
+/* Cards + stat tiles */
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
+  padding:22px;margin:0 0 20px;box-shadow:var(--shadow)}
+.card h2{margin:0 0 16px;font-size:16px;font-weight:650}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:16px;margin:0 0 22px}
+.stat{position:relative;display:flex;flex-direction:column;gap:5px;margin:0;
+  transition:transform .15s,border-color .15s}
+.stat:hover{transform:translateY(-2px);border-color:#3a3f4c}
+.stat .num{font-size:30px;font-weight:700;letter-spacing:-.5px;display:flex;align-items:center;gap:8px}
+.stat .muted{font-size:13px}
+.stat .tileico{position:absolute;top:18px;right:18px;color:var(--muted);opacity:.45}
+
+/* Typography + tables */
 h1,h2{margin:0 0 12px}.muted{color:var(--muted)}.small{font-size:13px}
-table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:10px;border-bottom:1px solid var(--line);vertical-align:middle}
-th{color:var(--muted);font-weight:600;font-size:13px}
-code{background:#0c0e12;padding:2px 6px;border-radius:6px}
-button{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:8px 14px;cursor:pointer;font-size:14px}
-button:hover{filter:brightness(1.1)}button.danger{background:var(--bad)}button.warn{background:#e3a008}
-input,select{background:#0c0e12;color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:14px}
-.actions{display:flex;gap:8px;flex-wrap:wrap}.inline{display:flex;gap:6px}
-label.check{display:block;margin:8px 0}label.field{display:block;margin:12px 0}
-.login{max-width:340px;margin:80px auto;text-align:center}.login input{width:100%;margin:8px 0}.login button{width:100%}
-.error{color:var(--bad);min-height:18px}.flash{background:#23314a;border:1px solid var(--accent);padding:10px 14px;border-radius:8px;margin:8px 0}
-.badge{padding:2px 8px;border-radius:999px;font-size:12px}.badge.ok{background:rgba(59,165,93,.2);color:var(--ok)}
-.badge.bad{background:rgba(237,66,69,.2);color:var(--bad)}.badge.pend{background:rgba(136,145,160,.2);color:var(--muted)}
-.logbar{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px}
-.filters{display:flex;gap:6px;flex-wrap:wrap}
-.chip{font-size:13px;padding:4px 10px;border-radius:999px;border:1px solid var(--line);color:var(--fg);text-decoration:none}
-.chip:hover{border-color:var(--accent)}.chip.active{background:var(--accent);border-color:var(--accent)}
-.logs{margin-top:12px;font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;max-height:65vh;overflow:auto;background:#0c0e12;border:1px solid var(--line);border-radius:8px;padding:10px}
-.logline{display:grid;grid-template-columns:96px 64px 150px 1fr;gap:8px;padding:2px 0;border-bottom:1px solid rgba(42,46,56,.5);white-space:pre-wrap;word-break:break-word}
-.logline .ts{color:var(--muted)}.logline .lname{color:var(--muted)}
-.logline .lvl{font-weight:600}
-.lvl-WARNING .lvl{color:#e3a008}.lvl-ERROR .lvl,.lvl-CRITICAL .lvl{color:var(--bad)}.lvl-DEBUG{opacity:.7}
+code{background:#0a0c10;border:1px solid var(--line);padding:2px 7px;border-radius:6px;font-size:12.5px}
+table{width:100%;border-collapse:collapse;font-size:14px}
+thead th{position:sticky;top:0;text-align:left;padding:11px 12px;color:var(--muted);
+  font-weight:600;font-size:11.5px;text-transform:uppercase;letter-spacing:.5px;
+  background:var(--card);border-bottom:1px solid var(--line)}
+tbody td{padding:12px;border-bottom:1px solid var(--line);vertical-align:middle}
+tbody tr:last-child td{border-bottom:0}
+tbody tr:hover{background:var(--card-2)}
+tr.empty:hover{background:transparent}
+.emptybox{display:flex;flex-direction:column;align-items:center;gap:8px;color:var(--muted);
+  padding:26px 10px;text-align:center}
+.emptybox .ic{opacity:.6}
+
+/* Buttons + inputs */
+button{background:var(--accent);color:#fff;border:0;border-radius:var(--radius-sm);
+  padding:9px 15px;cursor:pointer;font-size:13.5px;font-weight:600;font-family:inherit;
+  transition:filter .15s,background .15s}
+button:hover{filter:brightness(1.08)}button:active{filter:brightness(.94)}
+button.danger{background:var(--bad)}button.warn{background:var(--warn);color:#1c1403}
+button.ghost{background:transparent;border:1px solid var(--line);color:var(--fg)}
+button.ghost:hover{border-color:var(--accent);background:var(--accent-soft);filter:none}
+input,select{background:#0a0c10;color:var(--fg);border:1px solid var(--line);
+  border-radius:var(--radius-sm);padding:9px 11px;font-size:14px;font-family:inherit}
+input:focus,select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+input[type=checkbox]{accent-color:var(--accent);width:16px;height:16px}
+.actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.inline{display:inline-flex;gap:6px;align-items:center}
+label.check{display:flex;align-items:center;gap:9px;margin:10px 0;cursor:pointer}
+label.field{display:block;margin:14px 0;color:var(--muted);font-size:13px}
+label.field input,label.field select{display:block;margin-top:6px;width:100%;max-width:440px;color:var(--fg)}
+
+/* Login */
+.login{max-width:360px;width:100%;text-align:center}
+.login h1{font-size:22px}.login input{width:100%;margin:8px 0}.login button{width:100%;margin-top:4px}
+.error{color:var(--bad);min-height:18px}
+
+/* Flash banner */
+.flash{display:flex;align-items:center;gap:10px;background:var(--accent-soft);
+  border:1px solid var(--accent);color:var(--fg);padding:12px 16px;
+  border-radius:var(--radius-sm);margin:0 0 20px;font-size:14px}
+
+/* Badges + chips */
+.badge{display:inline-block;padding:3px 10px;border-radius:999px;font-size:12px;font-weight:600}
+.badge.ok{background:rgba(59,165,93,.16);color:#5fcf86}
+.badge.bad{background:rgba(237,66,69,.16);color:#f2787a}
+.badge.pend{background:rgba(139,145,160,.16);color:var(--muted)}
+.logbar{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:14px}
+.filters{display:flex;gap:8px;flex-wrap:wrap}
+.chip{display:inline-flex;align-items:center;font-size:13px;padding:6px 12px;border-radius:999px;
+  border:1px solid var(--line);color:var(--muted);text-decoration:none;font-weight:500;transition:.15s}
+.chip:hover{border-color:var(--accent);color:var(--fg)}
+.chip.active{background:var(--accent);border-color:var(--accent);color:#fff}
+
+/* Logs */
+.logs{font:12.5px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;max-height:64vh;overflow:auto;
+  background:#0a0c10;border:1px solid var(--line);border-radius:var(--radius-sm);padding:12px}
+.logline{display:grid;grid-template-columns:108px 70px 160px 1fr;gap:10px;padding:3px 4px;
+  border-bottom:1px solid rgba(42,46,56,.4);white-space:pre-wrap;word-break:break-word;border-radius:4px}
+.logline:hover{background:rgba(255,255,255,.025)}
+.logline .ts,.logline .lname{color:var(--muted)}
+.logline .lvl{font-weight:700}
+.lvl-WARNING .lvl{color:var(--warn)}.lvl-ERROR .lvl,.lvl-CRITICAL .lvl{color:var(--bad)}.lvl-DEBUG{opacity:.65}
 .lvl-ERROR .lmsg,.lvl-CRITICAL .lmsg{color:#f7a6a7}
+
+/* Responsive: collapse sidebar to an off-canvas drawer */
+@media(max-width:760px){
+  .sidebar{position:fixed;z-index:30;left:0;top:0;transform:translateX(-100%);
+    transition:transform .22s ease;box-shadow:var(--shadow)}
+  #navtoggle:checked ~ .sidebar{transform:translateX(0)}
+  #navtoggle:checked ~ .scrim{display:block;position:fixed;inset:0;z-index:20;background:rgba(0,0,0,.5)}
+  .burger{display:inline-flex}
+  main{padding:18px 16px 40px}.topbar{padding:13px 16px}
+  .card{overflow-x:auto}
+}
 """
 
 
