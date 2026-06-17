@@ -158,6 +158,7 @@ class RequestInfo:
 class ServiceInstance:
     """Safe (no API key) view of a Radarr/Sonarr instance configured in Seerr."""
     kind: str  # "radarr" or "sonarr"
+    id: int | None  # Seerr's serviceId — matches mediaInfo.serviceId
     name: str | None
     hostname: str | None
     port: int | None
@@ -522,26 +523,6 @@ class SeerrClient:
         data = await self._get(f"settings/{kind}")
         return [_to_service_instance(kind, raw) for raw in (data or [])]
 
-    async def get_arr_config(
-        self, media_type: MediaType, service_id: int | None
-    ) -> tuple[str, str]:
-        """Resolve the (base_url, api_key) for the arr instance holding the media.
-
-        Reads Seerr's own Radarr/Sonarr connection settings — the same creds Seerr
-        uses to talk to them — so no separate configuration is needed.
-        """
-        kind = "sonarr" if media_type == "tv" else "radarr"
-        instances = await self._get(f"settings/{kind}")
-        match = next((s for s in instances if s.get("id") == service_id), None)
-        if match is None and instances:
-            match = next((s for s in instances if s.get("isDefault")), instances[0])
-        if not match:
-            raise SeerrError(f"No {kind.title()} instance is configured in Seerr")
-
-        scheme = "https" if match.get("useSsl") else "http"
-        base_url = f"{scheme}://{match['hostname']}:{match['port']}{match.get('baseUrl') or ''}"
-        return base_url, match["apiKey"]
-
 
 # -- module-level parsing helpers -----------------------------------------
 
@@ -566,6 +547,7 @@ def _to_search_result(raw: dict[str, Any]) -> SearchResult:
 def _to_service_instance(kind: str, raw: dict[str, Any]) -> ServiceInstance:
     return ServiceInstance(
         kind=kind,
+        id=raw.get("id"),
         name=raw.get("name"),
         hostname=raw.get("hostname"),
         port=raw.get("port"),

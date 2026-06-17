@@ -7,6 +7,7 @@ import uuid
 import discord
 from discord.ext import commands
 
+from .arr import ArrManager
 from .config import Config
 from .linking import AccountLinker
 from .notifications import NotificationService
@@ -29,6 +30,7 @@ class VaultRequestrr(commands.Bot):
         self.seerr = SeerrClient(config.seerr_url, config.seerr_api_key)
         self.store = LinkStore(config.database_path)
         self.linker = AccountLinker(self.seerr, self.store)
+        self.arr = ArrManager(self)
         self.notifications = NotificationService(self)
         self.web = WebDashboard(self)
         self.plex: PlexClient | None = None
