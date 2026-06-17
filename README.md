@@ -2,9 +2,9 @@
 
 [![CI](https://github.com/vancityactivist/vaultrequestrr/actions/workflows/ci.yml/badge.svg)](https://github.com/vancityactivist/vaultrequestrr/actions/workflows/ci.yml)
 [![Docker](https://github.com/vancityactivist/vaultrequestrr/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/vancityactivist/vaultrequestrr/actions/workflows/docker-publish.yml)
-[![License: MIT](https://img.shields.io/github/license/vancityactivist/vaultrequestrr)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue?logo=python&logoColor=white)](Dockerfile)
-[![ghcr.io](https://img.shields.io/badge/ghcr.io-vaultrequestrr-2496ED?logo=docker&logoColor=white)](https://github.com/vancityactivist/vaultrequestrr/pkgs/container/vaultrequestrr)
+[![GHCR](https://img.shields.io/badge/GHCR-vaultrequestrr-2496ED?logo=docker&logoColor=white)](https://github.com/vancityactivist/vaultrequestrr/pkgs/container/vaultrequestrr)
 
 A Discord bot for requesting movies and TV shows through
 [Seerr](https://github.com/seerr-team/seerr) (the unified successor to
