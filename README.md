@@ -64,10 +64,23 @@ libraries to share. Sent invites are listed on the dashboard **Invites** page.
 
 ### Notifications
 
-The bot polls Seerr on a timer and **DMs the requester** when their request
-becomes available or is declined, and **DMs the reporter** when their issue is
-marked resolved (configurable, `POLL_INTERVAL_SECONDS`). Only requests and issues
-made through the bot are tracked.
+The bot **DMs the requester** when their request becomes available or is declined,
+and **DMs the reporter** when their issue is marked resolved. Only requests and
+issues made through the bot are tracked.
+
+Delivery is driven by a **Seerr webhook** for near-instant DMs. Set a webhook secret
+— either the `WEBHOOK_SECRET` env var or, more conveniently, the **Seerr webhook** card
+on the dashboard Settings page (which also shows the exact URL to paste) — then in Seerr
+enable **Settings → Notifications → Webhook** and point it at:
+
+```
+http://<vaultrequestrr-host>:<WEB_PORT>/webhook/seerr?token=<WEBHOOK_SECRET>
+```
+
+(The default JSON payload works as-is — no template needed.) A background poller
+still runs as a reconciliation backstop on `POLL_INTERVAL_SECONDS` (default `600`),
+so notifications are never lost if a webhook is missed; without the webhook
+configured, the poller alone delivers them, just more slowly.
 
 ### Admin dashboard
 
@@ -80,7 +93,8 @@ resolve/reopen and **re-search** actions), sent Plex invites, a live log viewer
 The Settings page lets you edit the **Seerr connection** (URL + API key) — the
 connection is validated before saving, applied immediately without a restart,
 and persisted to the database (the `SEERR_URL` / `SEERR_API_KEY` env vars are
-only the first-run default). It also exposes the bot behaviour toggles, a
+only the first-run default). It also exposes a **Seerr webhook** card (set/clear the
+webhook secret and copy the ready-to-paste URL), the bot behaviour toggles, a
 **Plex Invites** section (Login with Plex, server + library selection, enable
 toggle and per-user invite cap), and a **Radarr / Sonarr connections** manager.
 
@@ -111,6 +125,7 @@ Commands:
 | `/issue <title>` | Report a Video/Audio/Subtitle/Other problem with media on the server |
 | `/invite` | Invite a friend to Plex by email (linked users; admin-enabled) |
 | `/quota` | Show your remaining request quota and when it resets |
+| `/myrequests` | List your recent requests and their current status |
 | `/linkstatus` | Show which Seerr account you're linked to |
 | `/unlink` | Remove your link (you'll be asked again on the next request) |
 
@@ -195,12 +210,13 @@ is the optional admin dashboard (`5056`), which is served only when you set a
 | `DEFAULT_SEERR_USER_ID` | no | — | Fallback user id when linking is disabled |
 | `DATABASE_PATH` | no | `data/vaultrequestrr.sqlite3` | SQLite path for links |
 | `LOG_LEVEL` | no | `INFO` | `DEBUG`/`INFO`/`WARNING`/`ERROR` |
-| `POLL_INTERVAL_SECONDS` | no | `120` | How often to poll Seerr for status changes (0 disables) |
+| `POLL_INTERVAL_SECONDS` | no | `600` | Reconciliation poll interval; backstop to the webhook (0 disables) |
 | `NOTIFY_ON_AVAILABLE` | no | `true` | DM requester when media becomes available |
 | `NOTIFY_ON_DECLINED` | no | `true` | DM requester when a request is declined |
 | `NOTIFY_ON_ISSUE_RESOLVED` | no | `true` | DM reporter when their issue is resolved |
 | `WEB_PASSWORD` | no | — | Set to enable the admin dashboard |
 | `WEB_PORT` | no | `5056` | Port the dashboard listens on |
+| `WEBHOOK_SECRET` | no | — | Shared secret for the inbound Seerr webhook (blank = endpoint disabled) |
 
 ## Development
 

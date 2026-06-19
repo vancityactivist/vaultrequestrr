@@ -60,6 +60,24 @@ async def test_app_setting_get_set_upsert(store):
     assert await store.get_setting("seerr_url") == "http://b:5055"
 
 
+# -- tracked requests ------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_tracked_and_list_for_user(store):
+    await store.add_tracked_request(1, "42", "movie", 603, "The Matrix", None)
+    await store.add_tracked_request(2, "42", "tv", 1396, "Breaking Bad", "all")
+    await store.add_tracked_request(3, "99", "movie", 27205, "Inception", None)
+
+    one = await store.get_tracked(2)
+    assert one is not None and one.title == "Breaking Bad" and one.seasons == "all"
+    assert await store.get_tracked(404) is None
+
+    mine = await store.list_tracked_for("42")
+    assert {t.request_id for t in mine} == {1, 2}  # filtered by discord_id
+    assert mine[0].request_id == 2  # newest first (created_at DESC, id 2 after id 1)
+
+
 # -- tracked issues --------------------------------------------------------
 
 

@@ -17,6 +17,7 @@ from discord.ext import commands
 
 from ..linking import LinkStatus
 from ..seerr import (
+    REQUEST_DECLINED,
     STATUS_AVAILABLE,
     STATUS_PARTIALLY_AVAILABLE,
     STATUS_PENDING,
@@ -93,6 +94,28 @@ class RequestCog(commands.Cog):
             await interaction.followup.send(f"⚠️ {exc}", ephemeral=True)
             return
         await interaction.followup.send(embed=_quota_embed(quota), ephemeral=True)
+
+    @app_commands.command(
+        name="myrequests", description="Show the status of your recent requests"
+    )
+    async def myrequests(self, interaction: discord.Interaction) -> None:
+        link = await self.bot.linker.get_link(str(interaction.user.id))
+        if link is None:
+            await interaction.response.send_message(
+                "You're not linked yet. Make a request and you'll be prompted to link first.",
+                ephemeral=True,
+            )
+            return
+        rows = await self.bot.store.list_tracked_for(str(interaction.user.id))
+        if not rows:
+            await interaction.response.send_message(
+                "You haven't requested anything through me yet. Try `/movie` or `/tv`.",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(
+            embed=_my_requests_embed(rows), ephemeral=True
+        )
 
     # -- search entry point ------------------------------------------------
 
@@ -180,6 +203,30 @@ class RequestCog(commands.Cog):
         user_id: int | None,
     ) -> None:
         """Submit the request to Seerr. Assumes the interaction is deferred."""
+        # Best-effort quota pre-check: catch an out-of-quota user before the API
+        # rejects them, with a friendlier message. A lookup hiccup must never
+        # block a legitimate request, so we fall through to the real submit.
+        if user_id is not None:
+            try:
+                quota = await self.bot.seerr.get_quota(user_id)
+                status = quota.tv if media_type == "tv" else quota.movie
+                if not status.unlimited and (status.remaining or 0) <= 0:
+                    label = "📺 TV" if media_type == "tv" else "🎬 Movie"
+                    embed = discord.Embed(
+                        title="⚠️ Out of quota",
+                        description=(
+                            f"You've used your {label} request quota.\n"
+                            f"{format_quota_line(status)}"
+                        ),
+                        color=discord.Color.orange(),
+                    )
+                    await interaction.edit_original_response(
+                        content=None, embed=embed, view=None
+                    )
+                    return
+            except SeerrError:
+                pass  # never block a request because the quota lookup failed
+
         try:
             created = await self.bot.seerr.create_request(
                 media_type,
@@ -337,6 +384,7 @@ class SeasonSelectView(discord.ui.View):
         self._result = result
         self.selected: list[int] | str = "all"
         self._available = {s.season_number for s in details.seasons if s.available}
+        self._requested = {s.season_number for s in details.seasons if s.requested}
         self._all = {s.season_number for s in details.seasons}
         self.add_item(SeasonSelect(details))
         self.update_request_state()
@@ -345,12 +393,18 @@ class SeasonSelectView(discord.ui.View):
         return set(self._all) if self.selected == "all" else set(self.selected)
 
     def update_request_state(self) -> None:
-        """Disable Request when every selected season is already available."""
-        if self._all and self._all <= self._available:
+        """Disable Request when every selected season is already available or requested."""
+        # Seasons there's nothing to do for: already on the server or already in flight.
+        settled = self._available | self._requested
+        if self._all and self._all <= settled:
             self.request.disabled = True
-            self.request.label = "All seasons available"
+            self.request.label = (
+                "All seasons available"
+                if self._all <= self._available
+                else "All seasons requested"
+            )
         else:
-            self.request.disabled = not (self._selected_numbers() - self._available)
+            self.request.disabled = not (self._selected_numbers() - settled)
             self.request.label = "Request"
 
     @discord.ui.button(label="Request", style=discord.ButtonStyle.success, row=1)
@@ -543,6 +597,30 @@ def _season_emoji_text(season: SeasonInfo) -> tuple[str | None, str | None]:
     if season.requested:
         return "🕒", "Requested"
     return None, None
+
+
+def _tracked_status_line(tracked) -> str:  # type: ignore[no-untyped-def]
+    """Status emoji + label for one of a user's tracked requests."""
+    if tracked.notified_declined or tracked.request_status == REQUEST_DECLINED:
+        return "❌ Declined"
+    emoji, text = _status_emoji_text(tracked.media_status)
+    if emoji is None:
+        return "🕒 Requested"
+    return f"{emoji} {text}"
+
+
+def _my_requests_embed(rows) -> discord.Embed:  # type: ignore[no-untyped-def]
+    embed = discord.Embed(title="Your recent requests", color=discord.Color.blurple())
+    lines = []
+    for tracked in rows:
+        title = tracked.title or f"Request #{tracked.request_id}"
+        if tracked.media_type == "tv" and tracked.seasons:
+            seasons = "all seasons" if tracked.seasons == "all" else f"seasons {tracked.seasons}"
+            title = f"{title} ({seasons})"
+        kind = "📺" if tracked.media_type == "tv" else "🎬"
+        lines.append(f"{kind} **{title}** — {_tracked_status_line(tracked)}")
+    embed.description = "\n".join(lines)
+    return embed
 
 
 def _quota_embed(quota: UserQuota) -> discord.Embed:

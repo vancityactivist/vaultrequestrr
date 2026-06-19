@@ -206,6 +206,43 @@ async def test_resolved_issue_finalised_without_dm_when_off(store):
 
 
 @pytest.mark.asyncio
+async def test_check_request_triggers_dm(store):
+    """The webhook entry point re-checks one request and notifies, like the poller."""
+    await _track(store)
+    info = RequestInfo(id=10, request_status=REQUEST_PENDING, media_status=STATUS_AVAILABLE, media_type="movie", tmdb_id=603)
+    bot = FakeBot(store, FakeSeerr(info))
+    svc = NotificationService(bot)
+
+    await svc.check_request(10)
+
+    assert bot.sent == [(42, "✅ Now available")]
+    assert await store.pending_tracked() == []  # finalised
+
+
+@pytest.mark.asyncio
+async def test_check_request_unknown_is_noop(store):
+    bot = FakeBot(store, FakeSeerr())
+    svc = NotificationService(bot)
+
+    await svc.check_request(999)  # not tracked
+
+    assert bot.sent == []
+
+
+@pytest.mark.asyncio
+async def test_check_issue_triggers_dm(store):
+    await store.add_tracked_issue(5, "42", "movie", 603, "The Matrix", ISSUE_VIDEO, "no subs", ISSUE_OPEN)
+    bot = FakeBot(store, FakeSeerr(issues=[_issue(status=ISSUE_RESOLVED)]))
+    svc = NotificationService(bot)
+
+    await svc.check_issue(5)
+
+    assert bot.sent == [(42, "🛠️ Issue resolved")]
+    one = await store.get_tracked_issue(5)
+    assert one.notified_resolved
+
+
+@pytest.mark.asyncio
 async def test_404_stops_tracking(store):
     await _track(store)
     bot = FakeBot(store, FakeSeerr(exc=SeerrError("Seerr returned 404: not found")))

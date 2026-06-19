@@ -69,6 +69,7 @@ class WebDashboard:
                 web.get("/settings", self.settings_page),
                 web.post("/settings", self.settings_action),
                 web.post("/settings/connection", self.connection_action),
+                web.post("/settings/webhook", self.webhook_action),
                 web.post("/settings/arr/add", self.arr_add_action),
                 web.post("/settings/arr/update", self.arr_update_action),
                 web.post("/settings/arr/delete", self.arr_delete_action),
@@ -77,6 +78,7 @@ class WebDashboard:
                 web.post("/settings/plex/server", self.plex_server_action),
                 web.post("/settings/plex", self.plex_invites_action),
                 web.post("/settings/plex/disconnect", self.plex_disconnect_action),
+                web.post("/webhook/seerr", self.seerr_webhook),
             ]
         )
         return app
@@ -96,7 +98,8 @@ class WebDashboard:
 
     @web.middleware
     async def _auth_middleware(self, request: web.Request, handler):
-        if request.path in ("/login",):
+        # The webhook authenticates with its own shared secret, not the session.
+        if request.path in ("/login", "/webhook/seerr"):
             return await handler(request)
         token = request.cookies.get(COOKIE)
         if token and token in self._sessions:
@@ -136,6 +139,46 @@ class WebDashboard:
         response = web.HTTPFound("/login")
         response.del_cookie(COOKIE)
         raise response
+
+    # -- webhook -----------------------------------------------------------
+
+    async def seerr_webhook(self, request: web.Request) -> web.Response:
+        """Inbound Seerr webhook: a trigger to re-check one request/issue now.
+
+        We don't trust the payload's state — we just learn *which* request or
+        issue changed and re-run the same finalisation the poller would, so
+        notifications are idempotent and arrive in seconds instead of minutes.
+        Authenticated by a shared secret (?token= or X-Webhook-Token); the
+        endpoint is inert until WEBHOOK_SECRET is set.
+        """
+        secret = await self._effective_webhook_secret()
+        provided = request.query.get("token") or request.headers.get("X-Webhook-Token", "")
+        if not secret or not hmac.compare_digest(provided, secret):
+            return web.json_response({"error": "unauthorized"}, status=401)
+
+        try:
+            payload = await request.json()
+        except Exception:  # noqa: BLE001 - malformed body
+            return web.json_response({"error": "invalid json"}, status=400)
+
+        nt = str(payload.get("notification_type") or "")
+        if nt.startswith("ISSUE"):
+            issue_id = _webhook_int((payload.get("issue") or {}).get("issue_id"))
+            if issue_id is not None:
+                await self.bot.notifications.check_issue(issue_id)
+        elif nt.startswith("MEDIA"):
+            request_id = _webhook_int((payload.get("request") or {}).get("request_id"))
+            if request_id is not None:
+                await self.bot.notifications.check_request(request_id)
+        # TEST_NOTIFICATION and anything else: acknowledge without acting.
+        return web.json_response({"ok": True})
+
+    async def _effective_webhook_secret(self) -> str:
+        """Dashboard-set secret wins; the env var is only the first-run default."""
+        stored = await self.bot.store.get_setting("webhook_secret")
+        if stored is not None:  # empty string = explicitly disabled via the UI
+            return stored
+        return self.bot.config.webhook_secret
 
     # -- pages -------------------------------------------------------------
 
@@ -414,6 +457,9 @@ class WebDashboard:
         )
         key_placeholder = "•••••••• (unchanged — leave blank to keep)" if key_set else "Seerr API key"
 
+        webhook_secret = await self._effective_webhook_secret()
+        webhook_card = self._webhook_card(request, webhook_secret)
+
         arr_card = await self._arr_card()
         plex_card = await self._plex_card()
 
@@ -435,6 +481,8 @@ class WebDashboard:
             variables are only the first-run default).</p>
         </div>
 
+        {webhook_card}
+
         <div class="card">
           <h2>Bot settings</h2>
           <form method="post" action="/settings">
@@ -455,6 +503,41 @@ class WebDashboard:
         {arr_card}
         """
         return _html(_layout("Settings", body))
+
+    def _webhook_card(self, request: web.Request, secret: str) -> str:
+        """Webhook secret + the ready-to-paste Seerr webhook URL."""
+        if secret:
+            url = f"{request.scheme}://{request.host}/webhook/seerr?token={secret}"
+            status = (
+                '<p class="muted small">Enabled. In Seerr, add a <strong>Webhook</strong> '
+                "notification agent (Settings → Notifications → Webhook) pointing at:</p>"
+                f'<p><code>{html.escape(url)}</code></p>'
+            )
+            placeholder = "•••••••• (unchanged — leave blank to keep)"
+        else:
+            status = (
+                '<p class="muted small">Disabled — the webhook endpoint returns 401 until a '
+                "secret is set. Set one here, then point Seerr's Webhook agent at "
+                f'<code>{html.escape(request.scheme)}://{html.escape(request.host)}/webhook/seerr?token=YOUR_SECRET</code>.</p>'
+            )
+            placeholder = "Webhook secret"
+        return f"""
+        <div class="card">
+          <h2>Seerr webhook</h2>
+          {status}
+          <form method="post" action="/settings/webhook">
+            <label class="field">Webhook secret
+              <input type="password" name="webhook_secret" placeholder="{html.escape(placeholder)}" autocomplete="off">
+            </label>
+            <label class="check"><input type="checkbox" name="clear"> Disable webhook (clear the secret)</label>
+            <button type="submit">Save</button>
+            <button type="submit" name="action" value="generate" class="chip">Generate</button>
+          </form>
+          <p class="muted small">Drives instant request/issue notifications. Stored in the
+            database and kept across restarts (the <code>WEBHOOK_SECRET</code> env var is only
+            the first-run default).</p>
+        </div>
+        """
 
     async def _arr_card(self) -> str:
         """Editable Radarr/Sonarr connection manager (our own credentials)."""
@@ -833,6 +916,22 @@ class WebDashboard:
         await self.bot.apply_seerr_connection(url, effective_key)
         raise web.HTTPFound("/settings?msg=" + _q("Seerr connection saved."))
 
+    async def webhook_action(self, request: web.Request) -> web.Response:
+        data = await request.post()
+        if data.get("action") == "generate":
+            await self.bot.store.set_setting("webhook_secret", secrets.token_urlsafe(32))
+            raise web.HTTPFound("/settings?msg=" + _q("Generated a new webhook secret."))
+        if data.get("clear"):
+            await self.bot.store.set_setting("webhook_secret", "")
+            raise web.HTTPFound("/settings?msg=" + _q("Webhook disabled."))
+
+        secret = str(data.get("webhook_secret", "")).strip()
+        if not secret:
+            # Blank with no clear request => keep the current secret unchanged.
+            raise web.HTTPFound("/settings?msg=" + _q("No change to the webhook secret."))
+        await self.bot.store.set_setting("webhook_secret", secret)
+        raise web.HTTPFound("/settings?msg=" + _q("Webhook secret saved."))
+
     # -- Radarr/Sonarr connections -----------------------------------------
 
     @staticmethod
@@ -1076,6 +1175,16 @@ class WebDashboard:
 
 def _html(markup: str) -> web.Response:
     return web.Response(text=markup, content_type="text/html")
+
+
+def _webhook_int(value: object) -> int | None:
+    """Seerr sends ids as strings in webhook payloads; coerce best-effort."""
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 # Inline SVG path data (24x24 viewBox, stroke=currentColor) for nav + tiles.

@@ -43,6 +43,33 @@ class NotificationService:
     async def _before_loop(self) -> None:
         await self.bot.wait_until_ready()
 
+    # -- targeted checks (used by the Seerr webhook for instant delivery) ----
+
+    async def check_request(self, request_id: int) -> None:
+        """Re-check a single tracked request now (webhook-triggered).
+
+        A no-op if we aren't tracking this request. Reuses the same finalisation
+        path as the poller, so it's idempotent against the notified_* flags.
+        """
+        tracked = await self.bot.store.get_tracked(request_id)
+        if tracked is None:
+            return
+        await self._check_one(tracked)
+
+    async def check_issue(self, issue_id: int) -> None:
+        """Re-check a single tracked issue now (webhook-triggered)."""
+        tracked = await self.bot.store.get_tracked_issue(issue_id)
+        if tracked is None or tracked.notified_resolved:
+            return
+        try:
+            live = await self.bot.seerr.list_issues()
+        except SeerrError as exc:
+            logger.debug("Could not refresh issue %s: %s", issue_id, exc)
+            return
+        status = {issue.id: issue.status for issue in live}.get(issue_id)
+        if status is not None:
+            await self._apply_issue_status(tracked, status)
+
     async def _poll(self) -> None:
         try:
             pending = await self.bot.store.pending_tracked()
@@ -117,20 +144,23 @@ class NotificationService:
             return
         status_by_id = {issue.id: issue.status for issue in live}
 
-        runtime = self.bot.runtime
         for tracked in pending:
             status = status_by_id.get(tracked.issue_id)
-            if status is None or status != ISSUE_RESOLVED:
-                # Unknown (not in the page / deleted) or still open: keep status fresh.
-                if status is not None and status != tracked.status:
-                    await self.bot.store.mark_issue(tracked.issue_id, status=status)
-                continue
+            if status is not None:
+                await self._apply_issue_status(tracked, status)
 
-            if runtime.notify_on_issue_resolved:
-                await self._dm_issue_resolved(tracked)
-            await self.bot.store.mark_issue(
-                tracked.issue_id, status=ISSUE_RESOLVED, notified_resolved=True
-            )
+    async def _apply_issue_status(self, tracked: TrackedIssue, status: int) -> None:
+        """Finalise a tracked issue: DM on first resolution, else keep status fresh."""
+        if status != ISSUE_RESOLVED:
+            if status != tracked.status:
+                await self.bot.store.mark_issue(tracked.issue_id, status=status)
+            return
+
+        if self.bot.runtime.notify_on_issue_resolved and not tracked.notified_resolved:
+            await self._dm_issue_resolved(tracked)
+        await self.bot.store.mark_issue(
+            tracked.issue_id, status=ISSUE_RESOLVED, notified_resolved=True
+        )
 
     async def _dm_issue_resolved(self, tracked: TrackedIssue) -> None:
         try:
