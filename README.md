@@ -51,6 +51,21 @@ a single episode. Because Seerr's API attributes every API-key issue to the admi
 account, the real reporter is recorded in the issue message and tracked locally so
 the dashboard and resolution DMs know who filed it.
 
+### Approving requests
+
+Seerr only auto-fulfils requests for users with the *auto-approve* permission;
+everyone else's land **pending**. When a bot-submitted request comes back pending,
+VaultRequestrr immediately **DMs every configured admin** (and posts to an optional
+**approvals channel**) with **Approve / Decline** buttons — these are persistent, so
+they keep working hours later and across restarts. Admins can also run `/pending` to
+review the full queue (sourced from Seerr, so it catches requests made outside the
+bot) or use the dashboard **Approvals** page. Approving/declining calls Seerr and the
+requester is DM'd the outcome.
+
+Admins are a configured list of Discord user ids — set `ADMIN_DISCORD_IDS` or manage
+them on the dashboard **Settings → Approvals & admins** card (which also sets the
+approvals channel). That list gates `/pending`, the buttons, and who gets notified.
+
 ### Inviting friends to Plex
 
 Linked users can run `/invite` to bring a friend onto the Plex server. The bot
@@ -88,15 +103,17 @@ a webhook is missed. Set `POLL_INTERVAL_SECONDS=0` to disable polling entirely.
 
 If `WEB_PASSWORD` is set, a small web dashboard is served on `WEB_PORT` (default
 `5056`): health (Discord/Seerr/Plex status), linked accounts (with unlink/remap
-and per-user invite caps), recent request activity, reported issues (with
-resolve/reopen and **re-search** actions), sent Plex invites, a live log viewer
-(level filter + auto-refresh), and a **Settings** page. Sign in with the password.
+and per-user invite caps), recent request activity, an **Approvals** page (approve/
+decline pending requests), reported issues (with resolve/reopen and **re-search**
+actions), sent Plex invites, a live log viewer (level filter + auto-refresh), and a
+**Settings** page. Sign in with the password.
 
 The Settings page lets you edit the **Seerr connection** (URL + API key) — the
 connection is validated before saving, applied immediately without a restart,
 and persisted to the database (the `SEERR_URL` / `SEERR_API_KEY` env vars are
 only the first-run default). It also exposes a **Seerr webhook** card (set/clear the
-webhook secret and copy the ready-to-paste URL), the bot behaviour toggles, a
+webhook secret and copy the ready-to-paste URL), an **Approvals & admins** card
+(approver Discord ids + the optional approvals channel), the bot behaviour toggles, a
 **Plex Invites** section (Login with Plex, server + library selection, enable
 toggle and per-user invite cap), and a **Radarr / Sonarr connections** manager.
 
@@ -128,6 +145,7 @@ Commands:
 | `/invite` | Invite a friend to Plex by email (linked users; admin-enabled) |
 | `/quota` | Show your remaining request quota and when it resets |
 | `/myrequests` | List your recent requests and their current status |
+| `/pending` | (Admin) Review, approve, and decline requests awaiting approval |
 | `/linkstatus` | Show which Seerr account you're linked to |
 | `/unlink` | Remove your link (you'll be asked again on the next request) |
 
@@ -219,6 +237,8 @@ is the optional admin dashboard (`5056`), which is served only when you set a
 | `WEB_PASSWORD` | no | — | Set to enable the admin dashboard |
 | `WEB_PORT` | no | `5056` | Port the dashboard listens on |
 | `WEBHOOK_SECRET` | no | — | Shared secret for the inbound Seerr webhook (blank = endpoint disabled) |
+| `ADMIN_DISCORD_IDS` | no | — | Comma-separated Discord ids that can approve requests and get notified |
+| `APPROVALS_CHANNEL_ID` | no | — | Optional channel id to also post pending requests to |
 
 ## Development
 

@@ -489,3 +489,70 @@ async def test_error_response_raises():
         assert "Forbidden" in str(exc.value)
     finally:
         await client.aclose()
+
+
+# -- approval workflow -----------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_approve_and_decline_request_hit_right_paths():
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.path))
+        return httpx.Response(200, json={"id": 7, "status": 2})
+
+    client = make_client(handler)
+    try:
+        await client.approve_request(7)
+        await client.decline_request(7)
+    finally:
+        await client.aclose()
+    assert ("POST", "/api/v1/request/7/approve") in seen
+    assert ("POST", "/api/v1/request/7/decline") in seen
+
+
+@pytest.mark.asyncio
+async def test_list_pending_requests_parses_and_filters():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/request"
+        assert request.url.params.get("filter") == "pending"
+        payload = {
+            "results": [
+                {
+                    "id": 11,
+                    "type": "tv",
+                    "createdAt": "2026-06-18T10:00:00Z",
+                    "media": {"mediaType": "tv", "tmdbId": 1396},
+                    "requestedBy": {"id": 5, "displayName": "Neo"},
+                    "seasons": [{"seasonNumber": 1}, {"seasonNumber": 2}],
+                },
+            ]
+        }
+        return httpx.Response(200, json=payload)
+
+    client = make_client(handler)
+    try:
+        pending = await client.list_pending_requests()
+    finally:
+        await client.aclose()
+    assert len(pending) == 1
+    req = pending[0]
+    assert req.id == 11 and req.tmdb_id == 1396 and req.media_type == "tv"
+    assert req.requested_by_id == 5 and req.requested_by_name == "Neo"
+    assert req.seasons == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_get_title_returns_name_or_title():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/movie/603":
+            return httpx.Response(200, json={"title": "The Matrix"})
+        return httpx.Response(200, json={"name": "Breaking Bad"})
+
+    client = make_client(handler)
+    try:
+        assert await client.get_title("movie", 603) == "The Matrix"
+        assert await client.get_title("tv", 1396) == "Breaking Bad"
+    finally:
+        await client.aclose()

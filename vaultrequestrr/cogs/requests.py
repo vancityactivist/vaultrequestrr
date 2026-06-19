@@ -15,9 +15,11 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from ..approvals import build_approval_embeds, build_approval_view
 from ..linking import LinkStatus
 from ..seerr import (
     REQUEST_DECLINED,
+    REQUEST_PENDING,
     STATUS_AVAILABLE,
     STATUS_PARTIALLY_AVAILABLE,
     STATUS_PENDING,
@@ -116,6 +118,58 @@ class RequestCog(commands.Cog):
         await interaction.response.send_message(
             embed=_my_requests_embed(rows), ephemeral=True
         )
+
+    @app_commands.command(
+        name="pending", description="(Admin) Review and approve pending requests"
+    )
+    async def pending(self, interaction: discord.Interaction) -> None:
+        if not await self.bot.is_admin(interaction.user.id):
+            await interaction.response.send_message(
+                "⛔ This command is for approvers only.", ephemeral=True
+            )
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            requests = await self.bot.seerr.list_pending_requests()
+        except SeerrError as exc:
+            await interaction.followup.send(f"⚠️ {exc}", ephemeral=True)
+            return
+        if not requests:
+            await interaction.followup.send("Nothing pending — all caught up! 🎉", ephemeral=True)
+            return
+
+        # One actionable message per request (each carries its own approve/decline view).
+        shown = requests[:MAX_SELECT_OPTIONS]
+        await interaction.followup.send(
+            f"**{len(requests)} request(s) awaiting approval**"
+            + ("" if len(requests) <= len(shown) else f" (showing the oldest {len(shown)})"),
+            ephemeral=True,
+        )
+        for req in shown:
+            title = await self._resolve_pending_title(req)
+            embeds = await build_approval_embeds(
+                self.bot,
+                media_type=req.media_type,
+                tmdb_id=req.tmdb_id,
+                title=title,
+                requester_label=req.requested_by_name,
+                seasons=",".join(str(s) for s in req.seasons) or None,
+            )
+            await interaction.followup.send(
+                embeds=embeds, view=build_approval_view(req.id), ephemeral=True
+            )
+
+    async def _resolve_pending_title(self, req) -> str | None:  # type: ignore[no-untyped-def]
+        """Prefer the locally stored title; fall back to a TMDB lookup."""
+        tracked = await self.bot.store.get_tracked(req.id)
+        if tracked is not None and tracked.title:
+            return tracked.title
+        if req.media_type and req.tmdb_id is not None:
+            try:
+                return await self.bot.seerr.get_title(req.media_type, req.tmdb_id)
+            except SeerrError:
+                return None
+        return None
 
     # -- search entry point ------------------------------------------------
 
@@ -253,8 +307,24 @@ class RequestCog(commands.Cog):
                 seasons=_seasons_to_str(seasons),
             )
 
+        # Requests for users without auto-approve come back pending — ping the admins.
+        pending = (created or {}).get("status") == REQUEST_PENDING
+        if pending and request_id is not None:
+            await self.bot.notifications.notify_pending_approval(
+                int(request_id),
+                media_type=media_type,
+                tmdb_id=result.tmdb_id,
+                title=result.title,
+                requester_label=interaction.user.display_name,
+                seasons=_seasons_to_str(seasons),
+            )
+
         embeds = _success_embeds(result, seasons)
         body = embeds[-1]  # the details embed sits below the poster banner
+        if pending:
+            body.add_field(
+                name="Status", value="⏳ Pending admin approval", inline=False
+            )
         if user_id is not None:
             try:
                 quota = await self.bot.seerr.get_quota(user_id)

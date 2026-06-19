@@ -12,9 +12,10 @@ def _quota(remaining):
 
 
 class FakeSeerr:
-    def __init__(self, quota=None, quota_exc=None):
+    def __init__(self, quota=None, quota_exc=None, created_status=None):
         self._quota = quota
         self._quota_exc = quota_exc
+        self._created_status = created_status
         self.created = []
 
     async def get_quota(self, user_id):
@@ -24,7 +25,10 @@ class FakeSeerr:
 
     async def create_request(self, media_type, tmdb_id, *, user_id, seasons):
         self.created.append((media_type, tmdb_id, user_id, seasons))
-        return {"id": 77}
+        out = {"id": 77}
+        if self._created_status is not None:
+            out["status"] = self._created_status
+        return out
 
 
 class FakeStore:
@@ -35,11 +39,19 @@ class FakeStore:
         self.tracked.append(kw)
 
 
+class FakeNotifications:
+    def __init__(self):
+        self.pending = []
+
+    async def notify_pending_approval(self, request_id, **kw):
+        self.pending.append((request_id, kw))
+
+
 class FakeInteraction:
     def __init__(self):
         self.edits = []
         self.followups = []
-        self.user = SimpleNamespace(id=42)
+        self.user = SimpleNamespace(id=42, display_name="Neo")
 
     async def edit_original_response(self, **kw):
         self.edits.append(kw)
@@ -55,8 +67,8 @@ class FakeInteraction:
         return _F()
 
 
-def _cog(seerr, store):
-    bot = SimpleNamespace(seerr=seerr, store=store)
+def _cog(seerr, store, notifications=None):
+    bot = SimpleNamespace(seerr=seerr, store=store, notifications=notifications)
     return RequestCog(bot)
 
 
@@ -88,3 +100,28 @@ async def test_submit_proceeds_when_quota_lookup_fails():
     # A quota hiccup must not block a legitimate request.
     assert seerr.created == [("movie", 603, 7, None)]
     assert store.tracked and store.tracked[0]["request_id"] == 77
+
+
+@pytest.mark.asyncio
+async def test_submit_pending_notifies_admins():
+    seerr = FakeSeerr(quota=_quota(3), created_status=1)  # REQUEST_PENDING
+    notif = FakeNotifications()
+    cog = _cog(seerr, FakeStore(), notif)
+    inter = FakeInteraction()
+
+    await cog._submit(inter, "movie", _result(), None, user_id=7)
+
+    assert notif.pending and notif.pending[0][0] == 77
+    assert notif.pending[0][1]["requester_label"] == "Neo"
+
+
+@pytest.mark.asyncio
+async def test_submit_auto_approved_does_not_notify():
+    seerr = FakeSeerr(quota=_quota(3), created_status=2)  # REQUEST_APPROVED
+    notif = FakeNotifications()
+    cog = _cog(seerr, FakeStore(), notif)
+    inter = FakeInteraction()
+
+    await cog._submit(inter, "movie", _result(), None, user_id=7)
+
+    assert notif.pending == []

@@ -33,6 +33,14 @@ async def test_save_and_get(store):
 
 
 @pytest.mark.asyncio
+async def test_get_by_seerr_user_reverse_lookup(store):
+    await store.save("123", 7, "neo", "neo@example.com")
+    link = await store.get_by_seerr_user(7)
+    assert link is not None and link.discord_id == "123"
+    assert await store.get_by_seerr_user(999) is None
+
+
+@pytest.mark.asyncio
 async def test_save_upserts(store):
     await store.save("123", 7, "old", "old@example.com")
     await store.save("123", 9, "new", "new@example.com")

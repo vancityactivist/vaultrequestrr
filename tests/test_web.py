@@ -12,9 +12,24 @@ from vaultrequestrr.web import WebDashboard
 class FakeSeerr:
     def __init__(self):
         self.status_updates = []
+        self.approved = []
+        self.declined = []
+        self.pending = []
 
     async def test_connection(self):
         return None
+
+    async def list_pending_requests(self, *, take=100):
+        return self.pending
+
+    async def approve_request(self, request_id):
+        self.approved.append(request_id)
+
+    async def decline_request(self, request_id):
+        self.declined.append(request_id)
+
+    async def get_title(self, media_type, tmdb_id):
+        return f"Title {tmdb_id}"
 
     async def list_service_instances(self, kind):
         return []
@@ -88,6 +103,18 @@ class FakeBot:
         if stored is not None:
             return stored
         return self.config.webhook_secret
+
+    async def admin_ids(self):
+        stored = await self.store.get_setting("admin_discord_ids")
+        if stored is not None:
+            return {int(p) for p in stored.split(",") if p.strip().isdigit()}
+        return set(getattr(self.config, "admin_discord_ids", ()))
+
+    async def approvals_channel_id(self):
+        stored = await self.store.get_setting("approvals_channel_id")
+        if stored is not None:
+            return int(stored) if stored.strip().isdigit() else None
+        return getattr(self.config, "approvals_channel_id", None)
 
     async def plex_client_id(self):
         return "cid"
@@ -774,3 +801,69 @@ async def test_webhook_generate_creates_secret(client):
         json={"notification_type": "MEDIA_AVAILABLE", "request": {"request_id": "10"}},
     )
     assert ok.status == 200
+
+
+# -- approvals -------------------------------------------------------------
+
+
+from vaultrequestrr.seerr import PendingRequest  # noqa: E402
+
+
+@pytest.mark.asyncio
+async def test_approvals_page_lists_pending(client):
+    cli, _store, dash = client
+    dash.bot.seerr.pending = [
+        PendingRequest(
+            id=11, media_type="tv", tmdb_id=1396, requested_by_id=5,
+            requested_by_name="Neo", seasons=[1, 2], created_at="2026-06-18T10:00:00Z",
+        )
+    ]
+    await cli.post("/login", data={"password": "secret"})
+
+    page = await cli.get("/approvals")
+    body = await page.text()
+    assert "Pending approvals (1)" in body
+    assert "Title 1396" in body and "Neo" in body and "Approve" in body and "Decline" in body
+
+
+@pytest.mark.asyncio
+async def test_approval_approve_and_decline_actions(client):
+    cli, store, dash = client
+    await store.add_tracked_request(11, "42", "tv", 1396, "Breaking Bad", "all")
+    await cli.post("/login", data={"password": "secret"})
+
+    resp = await cli.post("/approvals/approve", data={"request_id": "11"}, allow_redirects=False)
+    assert resp.status == 302 and resp.headers["Location"].startswith("/approvals")
+    assert dash.bot.seerr.approved == [11]
+
+    resp = await cli.post("/approvals/decline", data={"request_id": "11"}, allow_redirects=False)
+    assert dash.bot.seerr.declined == [11]
+    # Declining marks it notified so the poller won't also DM "declined".
+    tracked = await store.get_tracked(11)
+    assert tracked.notified_declined and tracked.request_status == 3
+
+
+@pytest.mark.asyncio
+async def test_admins_card_persists_ids_and_channel(client):
+    cli, store, _dash = client
+    await cli.post("/login", data={"password": "secret"})
+
+    resp = await cli.post(
+        "/settings/admins",
+        data={"admin_discord_ids": "111, 222 garbage 333", "approvals_channel_id": "9090"},
+        allow_redirects=False,
+    )
+    assert resp.status == 302
+    assert await store.get_setting("admin_discord_ids") == "111,222,333"
+    assert await store.get_setting("approvals_channel_id") == "9090"
+
+
+@pytest.mark.asyncio
+async def test_settings_page_shows_admins_card(client):
+    cli, store, _dash = client
+    await store.set_setting("admin_discord_ids", "111,222")
+    await cli.post("/login", data={"password": "secret"})
+    page = await cli.get("/settings")
+    body = await page.text()
+    assert "Approvals &amp; admins" in body
+    assert "111, 222" in body  # pre-filled
