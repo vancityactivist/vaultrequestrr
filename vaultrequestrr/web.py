@@ -22,6 +22,7 @@ from .seerr import (
     ISSUE_OPEN,
     ISSUE_RESOLVED,
     ISSUE_TYPE_LABELS,
+    REQUEST_APPROVED,
     REQUEST_DECLINED,
     STATUS_AVAILABLE,
     SeerrClient,
@@ -57,6 +58,9 @@ class WebDashboard:
                 web.post("/links/limit", self.limit_action),
                 web.get("/invites", self.invites_page),
                 web.get("/activity", self.activity_page),
+                web.get("/approvals", self.approvals_page),
+                web.post("/approvals/approve", self.approval_approve_action),
+                web.post("/approvals/decline", self.approval_decline_action),
                 web.get("/issues", self.issues_page),
                 web.post("/issues/resolve", self.issue_resolve_action),
                 web.post("/issues/reopen", self.issue_reopen_action),
@@ -70,6 +74,7 @@ class WebDashboard:
                 web.post("/settings", self.settings_action),
                 web.post("/settings/connection", self.connection_action),
                 web.post("/settings/webhook", self.webhook_action),
+                web.post("/settings/admins", self.admins_action),
                 web.post("/settings/arr/add", self.arr_add_action),
                 web.post("/settings/arr/update", self.arr_update_action),
                 web.post("/settings/arr/delete", self.arr_delete_action),
@@ -325,6 +330,91 @@ class WebDashboard:
         """
         return _html(_layout("Invites", body))
 
+    async def approvals_page(self, request: web.Request) -> web.Response:
+        try:
+            pending = await self.bot.seerr.list_pending_requests()
+        except SeerrError as exc:
+            pending = []
+            logger.debug("Could not load pending requests: %s", exc)
+
+        rows = ""
+        for req in pending:
+            title = await self._resolve_request_title(req)
+            kind = "📺 TV" if req.media_type == "tv" else "🎬 Movie"
+            seasons = ", ".join(str(s) for s in req.seasons) or "—"
+            rows += f"""
+            <tr>
+              <td>{html.escape(title)}</td>
+              <td>{kind}</td>
+              <td>{html.escape(req.requested_by_name or '—')}</td>
+              <td>{html.escape(seasons)}</td>
+              <td>{html.escape((req.created_at or '')[:19])}</td>
+              <td class="actions">
+                <form method="post" action="/approvals/approve">
+                  <input type="hidden" name="request_id" value="{req.id}">
+                  <button>Approve</button>
+                </form>
+                <form method="post" action="/approvals/decline">
+                  <input type="hidden" name="request_id" value="{req.id}">
+                  <button class="danger">Decline</button>
+                </form>
+              </td>
+            </tr>"""
+        if not pending:
+            rows = _empty_row(6, "Nothing awaiting approval.", "approvals")
+
+        body = f"""
+        {_flash(request)}
+        <div class="card">
+          <h2>Pending approvals ({len(pending)})</h2>
+          <table>
+            <thead><tr><th>Title</th><th>Type</th><th>Requested by</th><th>Seasons</th><th>When</th><th>Actions</th></tr></thead>
+            <tbody>{rows}</tbody>
+          </table>
+          <p class="muted small">Requests from users without auto-approve wait here. Admins
+            are also DM'd (and the approvals channel pinged) when these come in.</p>
+        </div>
+        """
+        return _html(_layout("Approvals", body))
+
+    async def _resolve_request_title(self, req) -> str:  # type: ignore[no-untyped-def]
+        tracked = await self.bot.store.get_tracked(req.id)
+        if tracked is not None and tracked.title:
+            return tracked.title
+        if req.media_type and req.tmdb_id is not None:
+            try:
+                return (await self.bot.seerr.get_title(req.media_type, req.tmdb_id)) or "—"
+            except SeerrError:
+                return "—"
+        return "—"
+
+    async def approval_approve_action(self, request: web.Request) -> web.Response:
+        await self._decide_request(request, approve=True)
+
+    async def approval_decline_action(self, request: web.Request) -> web.Response:
+        await self._decide_request(request, approve=False)
+
+    async def _decide_request(self, request: web.Request, *, approve: bool) -> None:
+        data = await request.post()
+        try:
+            request_id = int(str(data.get("request_id", "")))
+        except ValueError:
+            raise web.HTTPFound("/approvals?msg=" + _q("Missing request id."))
+        try:
+            if approve:
+                await self.bot.seerr.approve_request(request_id)
+            else:
+                await self.bot.seerr.decline_request(request_id)
+        except SeerrError as exc:
+            raise web.HTTPFound("/approvals?msg=" + _q(f"Seerr error: {exc}"))
+        await self.bot.store.mark_tracked(
+            request_id,
+            request_status=REQUEST_APPROVED if approve else REQUEST_DECLINED,
+            notified_declined=None if approve else True,
+        )
+        verb = "approved" if approve else "declined"
+        raise web.HTTPFound("/approvals?msg=" + _q(f"Request {verb}."))
+
     async def issues_page(self, request: web.Request) -> web.Response:
         items = await self.bot.store.recent_issues(100)
 
@@ -456,6 +546,8 @@ class WebDashboard:
         webhook_secret = await self._effective_webhook_secret()
         webhook_card = self._webhook_card(request, webhook_secret)
 
+        admins_card = await self._admins_card()
+
         arr_card = await self._arr_card()
         plex_card = await self._plex_card()
 
@@ -478,6 +570,8 @@ class WebDashboard:
         </div>
 
         {webhook_card}
+
+        {admins_card}
 
         <div class="card">
           <h2>Bot settings</h2>
@@ -532,6 +626,32 @@ class WebDashboard:
           <p class="muted small">Drives instant request/issue notifications. Stored in the
             database and kept across restarts (the <code>WEBHOOK_SECRET</code> env var is only
             the first-run default).</p>
+        </div>
+        """
+
+    async def _admins_card(self) -> str:
+        """Manage approver Discord ids + the optional approvals channel."""
+        ids = sorted(await self.bot.admin_ids())
+        ids_value = ", ".join(str(i) for i in ids)
+        channel = await self.bot.approvals_channel_id()
+        channel_value = "" if channel is None else str(channel)
+        return f"""
+        <div class="card">
+          <h2>Approvals &amp; admins</h2>
+          <form method="post" action="/settings/admins">
+            <label class="field">Approver Discord IDs
+              <input type="text" name="admin_discord_ids" value="{html.escape(ids_value)}" placeholder="e.g. 1234567890, 9876543210">
+            </label>
+            <label class="field">Approvals channel ID (optional)
+              <input type="text" name="approvals_channel_id" value="{html.escape(channel_value)}" placeholder="Discord channel id to post pending requests to">
+            </label>
+            <button type="submit">Save</button>
+          </form>
+          <p class="muted small">These users can run <code>/pending</code>, use the
+            Approve/Decline buttons, and are DM'd when a request needs approval. If a
+            channel id is set, pending requests are also posted there. Stored in the
+            database (the <code>ADMIN_DISCORD_IDS</code> / <code>APPROVALS_CHANNEL_ID</code>
+            env vars are only the first-run default).</p>
         </div>
         """
 
@@ -928,6 +1048,19 @@ class WebDashboard:
         await self.bot.store.set_setting("webhook_secret", secret)
         raise web.HTTPFound("/settings?msg=" + _q("Webhook secret saved."))
 
+    async def admins_action(self, request: web.Request) -> web.Response:
+        data = await request.post()
+        # Normalise to a clean comma-separated list of integer ids.
+        raw = str(data.get("admin_discord_ids", ""))
+        ids = [p.strip() for p in raw.replace(" ", ",").split(",") if p.strip().isdigit()]
+        await self.bot.store.set_setting("admin_discord_ids", ",".join(ids))
+
+        channel = str(data.get("approvals_channel_id", "")).strip()
+        await self.bot.store.set_setting(
+            "approvals_channel_id", channel if channel.isdigit() else ""
+        )
+        raise web.HTTPFound("/settings?msg=" + _q("Approval settings saved."))
+
     # -- Radarr/Sonarr connections -----------------------------------------
 
     @staticmethod
@@ -1197,6 +1330,7 @@ _ICON_PATHS = {
     "users": '<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
     "clock": '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
     "server": '<rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/>',
+    "approvals": '<path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>',
 }
 
 # Sidebar nav: (href, label, icon). `label` doubles as the active-state key —
@@ -1205,6 +1339,7 @@ _NAV = [
     ("/", "Dashboard", "home"),
     ("/links", "Links", "link"),
     ("/activity", "Activity", "activity"),
+    ("/approvals", "Approvals", "approvals"),
     ("/issues", "Issues", "issue"),
     ("/invites", "Invites", "mail"),
     ("/logs", "Logs", "logs"),

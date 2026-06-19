@@ -51,6 +51,26 @@ class VaultRequestrr(commands.Bot):
             return stored
         return self.config.webhook_secret
 
+    async def admin_ids(self) -> set[int]:
+        """Discord ids that can approve requests and get notified of pending ones.
+
+        Dashboard-set list wins; the ADMIN_DISCORD_IDS env var is the default.
+        """
+        stored = await self.store.get_setting("admin_discord_ids")
+        if stored is not None:
+            return {int(p) for p in stored.split(",") if p.strip().isdigit()}
+        return set(self.config.admin_discord_ids)
+
+    async def is_admin(self, discord_id: int | str) -> bool:
+        return int(discord_id) in await self.admin_ids()
+
+    async def approvals_channel_id(self) -> int | None:
+        """Channel to post pending-approval cards to (dashboard-set wins over env)."""
+        stored = await self.store.get_setting("approvals_channel_id")
+        if stored is not None:
+            return int(stored) if stored.strip().isdigit() else None
+        return self.config.approvals_channel_id
+
     async def plex_client_id(self) -> str:
         """Stable Plex client identifier, generated once and persisted."""
         client_id = await self.store.get_setting("plex_client_id")
@@ -83,6 +103,12 @@ class VaultRequestrr(commands.Bot):
 
     async def setup_hook(self) -> None:
         await self.store.connect()
+
+        # Register persistent approve/decline buttons so they keep working across
+        # restarts (an admin may act on a pending request hours later).
+        from .approvals import ApproveButton, DeclineButton
+
+        self.add_dynamic_items(ApproveButton, DeclineButton)
 
         # Persisted web-edited connection overrides env (env is the first-run default).
         url = await self.store.get_setting("seerr_url")

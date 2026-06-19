@@ -217,6 +217,15 @@ class LinkStore:
         await self._conn.commit()
         return AccountLink(discord_id, seerr_user_id, plex_username, email, linked_at)
 
+    async def get_by_seerr_user(self, seerr_user_id: int) -> AccountLink | None:
+        """Reverse lookup: find the Discord link for a Seerr user id."""
+        async with self._conn.execute(
+            "SELECT * FROM account_links WHERE seerr_user_id = ? LIMIT 1",
+            (seerr_user_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return _row_to_link(row) if row else None
+
     async def remove(self, discord_id: str) -> None:
         await self._conn.execute(
             "DELETE FROM account_links WHERE discord_id = ?", (discord_id,)

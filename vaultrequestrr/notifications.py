@@ -69,6 +69,53 @@ class NotificationService:
             self._loop.change_interval(seconds=target)
             logger.debug("Poll cadence set to %ds (webhook backstop adapts)", target)
 
+    # -- approvals ---------------------------------------------------------
+
+    async def notify_pending_approval(
+        self,
+        request_id: int,
+        *,
+        media_type: str | None,
+        tmdb_id: int | None,
+        title: str | None,
+        requester_label: str | None,
+        seasons: str | None,
+    ) -> None:
+        """Announce a request awaiting approval: DM each admin and post to the channel."""
+        from .approvals import build_approval_embeds, build_approval_view
+
+        embeds = await build_approval_embeds(
+            self.bot,
+            media_type=media_type,
+            tmdb_id=tmdb_id,
+            title=title,
+            requester_label=requester_label,
+            seasons=seasons,
+        )
+
+        for admin_id in await self.bot.admin_ids():
+            try:
+                user = await self.bot.fetch_user(admin_id)
+            except (discord.NotFound, discord.HTTPException, ValueError) as exc:
+                logger.warning("Could not resolve admin %s: %s", admin_id, exc)
+                continue
+            try:
+                await user.send(embeds=embeds, view=build_approval_view(request_id))
+            except discord.Forbidden:
+                logger.info("Admin %s has DMs disabled; skipping", admin_id)
+            except discord.HTTPException as exc:
+                logger.warning("Failed to DM admin %s: %s", admin_id, exc)
+
+        channel_id = await self.bot.approvals_channel_id()
+        if channel_id is not None:
+            try:
+                channel = self.bot.get_channel(channel_id) or await self.bot.fetch_channel(
+                    channel_id
+                )
+                await channel.send(embeds=embeds, view=build_approval_view(request_id))
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
+                logger.warning("Could not post to approvals channel %s: %s", channel_id, exc)
+
     # -- targeted checks (used by the Seerr webhook for instant delivery) ----
 
     async def check_request(self, request_id: int) -> None:

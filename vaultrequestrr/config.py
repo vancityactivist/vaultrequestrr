@@ -39,6 +39,10 @@ class Config:
     web_password: str
     # Shared secret for the inbound Seerr webhook; empty disables the endpoint.
     webhook_secret: str
+    # Approval workflow: admins who can approve/decline + get notified, and an
+    # optional channel to post pending requests to. Both overridable via the dashboard.
+    admin_discord_ids: tuple[int, ...]
+    approvals_channel_id: int | None
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -78,7 +82,24 @@ class Config:
             web_port=_optional_int(os.getenv("WEB_PORT")) or 5056,
             web_password=os.getenv("WEB_PASSWORD", "").strip(),
             webhook_secret=os.getenv("WEBHOOK_SECRET", "").strip(),
+            admin_discord_ids=_int_list(os.getenv("ADMIN_DISCORD_IDS")),
+            approvals_channel_id=_optional_int(os.getenv("APPROVALS_CHANNEL_ID")),
         )
+
+
+def _int_list(value: str | None) -> tuple[int, ...]:
+    """Parse a comma-separated list of integer ids (ignoring blanks/garbage)."""
+    if not value:
+        return ()
+    ids = []
+    for part in value.split(","):
+        part = part.strip()
+        if part:
+            try:
+                ids.append(int(part))
+            except ValueError as exc:
+                raise ConfigError(f"Expected integer ids but got {part!r}") from exc
+    return tuple(ids)
 
 
 def _optional_int(value: str | None) -> int | None:

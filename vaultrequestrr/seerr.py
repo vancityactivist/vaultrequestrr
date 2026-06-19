@@ -184,6 +184,18 @@ class IssueInfo:
     created_at: str | None
 
 
+@dataclass(frozen=True)
+class PendingRequest:
+    """A request awaiting admin approval (request.status == REQUEST_PENDING)."""
+    id: int
+    media_type: str | None
+    tmdb_id: int | None
+    requested_by_id: int | None
+    requested_by_name: str | None
+    seasons: list[int]
+    created_at: str | None
+
+
 class SeerrClient:
     def __init__(
         self,
@@ -461,6 +473,32 @@ class SeerrClient:
             tmdb_id=media.get("tmdbId"),
         )
 
+    async def approve_request(self, request_id: int) -> None:
+        """Approve a pending request (admin action)."""
+        await self._post(f"request/{request_id}/approve", {})
+
+    async def decline_request(self, request_id: int) -> None:
+        """Decline a pending request (admin action)."""
+        await self._post(f"request/{request_id}/decline", {})
+
+    async def list_pending_requests(self, *, take: int = 100) -> list[PendingRequest]:
+        """All requests awaiting approval, oldest first."""
+        data = await self._get(
+            "request",
+            params={"take": take, "skip": 0, "sort": "added", "filter": "pending"},
+        )
+        return [_to_pending_request(raw) for raw in data.get("results", [])]
+
+    async def get_title(self, media_type: MediaType, tmdb_id: int) -> str | None:
+        """Best-effort human title for a movie/TV id (request payloads omit it)."""
+        endpoint = "tv" if media_type == "tv" else "movie"
+        try:
+            data = await self._get(f"{endpoint}/{tmdb_id}")
+        except SeerrError as exc:
+            logger.debug("Could not load title for %s/%s: %s", endpoint, tmdb_id, exc)
+            return None
+        return data.get("name") or data.get("title")
+
     # -- issues ------------------------------------------------------------
 
     async def create_issue(
@@ -568,6 +606,29 @@ def _to_issue_info(raw: dict[str, Any]) -> IssueInfo:
         media_type=media.get("mediaType"),
         tmdb_id=media.get("tmdbId"),
         created_by_name=created_by.get("displayName") or created_by.get("username"),
+        created_at=raw.get("createdAt"),
+    )
+
+
+def _to_pending_request(raw: dict[str, Any]) -> PendingRequest:
+    media = raw.get("media") or {}
+    requested_by = raw.get("requestedBy") or {}
+    seasons = [
+        s.get("seasonNumber")
+        for s in (raw.get("seasons") or [])
+        if s.get("seasonNumber") is not None
+    ]
+    return PendingRequest(
+        id=raw.get("id"),
+        media_type=media.get("mediaType") or raw.get("type"),
+        tmdb_id=media.get("tmdbId"),
+        requested_by_id=requested_by.get("id"),
+        requested_by_name=(
+            requested_by.get("displayName")
+            or requested_by.get("plexUsername")
+            or requested_by.get("username")
+        ),
+        seasons=seasons,
         created_at=raw.get("createdAt"),
     )
 
