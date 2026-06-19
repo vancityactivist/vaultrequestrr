@@ -25,12 +25,18 @@ from .store import TrackedIssue, TrackedRequest
 
 logger = logging.getLogger(__name__)
 
+# When no Seerr webhook is configured, polling is the only delivery path, so we
+# poll at this tighter cadence for near-real-time DMs. With a webhook set, the
+# poller relaxes to the (longer) configured POLL_INTERVAL_SECONDS as a backstop.
+ACTIVE_POLL_SECONDS = 120
+MIN_POLL_SECONDS = 30
+
 
 class NotificationService:
     def __init__(self, bot) -> None:  # type: ignore[no-untyped-def]
         self.bot = bot
-        interval = max(bot.config.poll_interval_seconds, 30)
-        self._loop = tasks.loop(seconds=interval)(self._poll)
+        # Start tight; the first poll re-evaluates and relaxes if a webhook exists.
+        self._loop = tasks.loop(seconds=self._floor(ACTIVE_POLL_SECONDS))(self._poll)
         self._loop.before_loop(self._before_loop)
 
     def start(self) -> None:
@@ -42,6 +48,53 @@ class NotificationService:
 
     async def _before_loop(self) -> None:
         await self.bot.wait_until_ready()
+
+    # -- adaptive cadence --------------------------------------------------
+
+    def _floor(self, seconds: int) -> int:
+        return max(seconds, MIN_POLL_SECONDS)
+
+    async def _target_interval(self) -> int:
+        """Tight when polling is the only delivery path; relaxed once a webhook exists."""
+        backstop = self._floor(self.bot.config.poll_interval_seconds)
+        try:
+            has_webhook = bool(await self.bot.effective_webhook_secret())
+        except Exception:  # noqa: BLE001 - never let cadence logic break the poll
+            has_webhook = False
+        return backstop if has_webhook else min(backstop, self._floor(ACTIVE_POLL_SECONDS))
+
+    async def _adapt_interval(self) -> None:
+        target = await self._target_interval()
+        if round(self._loop.seconds or 0) != target:
+            self._loop.change_interval(seconds=target)
+            logger.debug("Poll cadence set to %ds (webhook backstop adapts)", target)
+
+    # -- targeted checks (used by the Seerr webhook for instant delivery) ----
+
+    async def check_request(self, request_id: int) -> None:
+        """Re-check a single tracked request now (webhook-triggered).
+
+        A no-op if we aren't tracking this request. Reuses the same finalisation
+        path as the poller, so it's idempotent against the notified_* flags.
+        """
+        tracked = await self.bot.store.get_tracked(request_id)
+        if tracked is None:
+            return
+        await self._check_one(tracked)
+
+    async def check_issue(self, issue_id: int) -> None:
+        """Re-check a single tracked issue now (webhook-triggered)."""
+        tracked = await self.bot.store.get_tracked_issue(issue_id)
+        if tracked is None or tracked.notified_resolved:
+            return
+        try:
+            live = await self.bot.seerr.list_issues()
+        except SeerrError as exc:
+            logger.debug("Could not refresh issue %s: %s", issue_id, exc)
+            return
+        status = {issue.id: issue.status for issue in live}.get(issue_id)
+        if status is not None:
+            await self._apply_issue_status(tracked, status)
 
     async def _poll(self) -> None:
         try:
@@ -60,6 +113,11 @@ class NotificationService:
             await self._poll_issues()
         except Exception:  # noqa: BLE001
             logger.exception("Failed to poll tracked issues")
+
+        try:
+            await self._adapt_interval()
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to adapt poll cadence")
 
     async def _check_one(self, tracked: TrackedRequest) -> None:
         runtime = self.bot.runtime
@@ -117,20 +175,23 @@ class NotificationService:
             return
         status_by_id = {issue.id: issue.status for issue in live}
 
-        runtime = self.bot.runtime
         for tracked in pending:
             status = status_by_id.get(tracked.issue_id)
-            if status is None or status != ISSUE_RESOLVED:
-                # Unknown (not in the page / deleted) or still open: keep status fresh.
-                if status is not None and status != tracked.status:
-                    await self.bot.store.mark_issue(tracked.issue_id, status=status)
-                continue
+            if status is not None:
+                await self._apply_issue_status(tracked, status)
 
-            if runtime.notify_on_issue_resolved:
-                await self._dm_issue_resolved(tracked)
-            await self.bot.store.mark_issue(
-                tracked.issue_id, status=ISSUE_RESOLVED, notified_resolved=True
-            )
+    async def _apply_issue_status(self, tracked: TrackedIssue, status: int) -> None:
+        """Finalise a tracked issue: DM on first resolution, else keep status fresh."""
+        if status != ISSUE_RESOLVED:
+            if status != tracked.status:
+                await self.bot.store.mark_issue(tracked.issue_id, status=status)
+            return
+
+        if self.bot.runtime.notify_on_issue_resolved and not tracked.notified_resolved:
+            await self._dm_issue_resolved(tracked)
+        await self.bot.store.mark_issue(
+            tracked.issue_id, status=ISSUE_RESOLVED, notified_resolved=True
+        )
 
     async def _dm_issue_resolved(self, tracked: TrackedIssue) -> None:
         try:

@@ -37,6 +37,8 @@ class Config:
     # Web dashboard
     web_port: int
     web_password: str
+    # Shared secret for the inbound Seerr webhook; empty disables the endpoint.
+    webhook_secret: str
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -67,7 +69,7 @@ class Config:
             default_seerr_user_id=_optional_int(os.getenv("DEFAULT_SEERR_USER_ID")),
             database_path=os.getenv("DATABASE_PATH", "data/vaultrequestrr.sqlite3").strip(),
             log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper(),
-            poll_interval_seconds=_optional_int(os.getenv("POLL_INTERVAL_SECONDS")) or 120,
+            poll_interval_seconds=_optional_int(os.getenv("POLL_INTERVAL_SECONDS")) or 600,
             notify_on_available=_bool(os.getenv("NOTIFY_ON_AVAILABLE"), default=True),
             notify_on_declined=_bool(os.getenv("NOTIFY_ON_DECLINED"), default=True),
             notify_on_issue_resolved=_bool(
@@ -75,6 +77,7 @@ class Config:
             ),
             web_port=_optional_int(os.getenv("WEB_PORT")) or 5056,
             web_password=os.getenv("WEB_PASSWORD", "").strip(),
+            webhook_secret=os.getenv("WEBHOOK_SECRET", "").strip(),
         )
 
 

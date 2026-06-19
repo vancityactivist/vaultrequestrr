@@ -274,6 +274,25 @@ class LinkStore:
             rows = await cursor.fetchall()
         return [_row_to_tracked(row) for row in rows]
 
+    async def get_tracked(self, request_id: int) -> TrackedRequest | None:
+        async with self._conn.execute(
+            "SELECT * FROM tracked_requests WHERE request_id = ?", (request_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+        return _row_to_tracked(row) if row else None
+
+    async def list_tracked_for(
+        self, discord_id: str, limit: int = 25
+    ) -> list[TrackedRequest]:
+        """A user's own recent requests (newest first) for the /myrequests command."""
+        async with self._conn.execute(
+            "SELECT * FROM tracked_requests WHERE discord_id = ? "
+            "ORDER BY created_at DESC, request_id DESC LIMIT ?",
+            (discord_id, limit),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [_row_to_tracked(row) for row in rows]
+
     async def mark_tracked(
         self,
         request_id: int,

@@ -40,6 +40,17 @@ class VaultRequestrr(commands.Bot):
         """The Seerr base URL the live client is currently using."""
         return self._seerr_url
 
+    async def effective_webhook_secret(self) -> str:
+        """The active webhook secret: dashboard-set wins, env is the first-run default.
+
+        An empty string stored via the dashboard means "explicitly disabled" and
+        overrides the env var.
+        """
+        stored = await self.store.get_setting("webhook_secret")
+        if stored is not None:
+            return stored
+        return self.config.webhook_secret
+
     async def plex_client_id(self) -> str:
         """Stable Plex client identifier, generated once and persisted."""
         client_id = await self.store.get_setting("plex_client_id")
@@ -115,7 +126,9 @@ class VaultRequestrr(commands.Bot):
         if self.config.poll_interval_seconds > 0:
             self.notifications.start()
             logger.info(
-                "Notification poller started (every %ds)", self.config.poll_interval_seconds
+                "Notification poller started (adaptive: tight until a Seerr webhook is "
+                "configured, then relaxes to a %ds backstop)",
+                self.config.poll_interval_seconds,
             )
 
         if self.config.web_password:

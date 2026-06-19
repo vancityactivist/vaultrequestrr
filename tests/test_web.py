@@ -39,6 +39,18 @@ class FakePlex:
         pass
 
 
+class FakeNotifications:
+    def __init__(self):
+        self.requests = []
+        self.issues = []
+
+    async def check_request(self, request_id):
+        self.requests.append(request_id)
+
+    async def check_issue(self, issue_id):
+        self.issues.append(issue_id)
+
+
 class FakeBot:
     def __init__(self, store):
         self.store = store
@@ -50,7 +62,9 @@ class FakeBot:
             web_port=5056,
             seerr_url="http://seerr:5055",
             seerr_api_key="envkey",
+            webhook_secret="hook-secret",
         )
+        self.notifications = FakeNotifications()
         self.runtime = SimpleNamespace(
             require_linking=True,
             notify_on_available=True,
@@ -68,6 +82,12 @@ class FakeBot:
 
     async def apply_seerr_connection(self, url, key):
         self.applied = (url, key)
+
+    async def effective_webhook_secret(self):
+        stored = await self.store.get_setting("webhook_secret")
+        if stored is not None:
+            return stored
+        return self.config.webhook_secret
 
     async def plex_client_id(self):
         return "cid"
@@ -617,3 +637,140 @@ async def test_media_search_and_grab(client, monkeypatch):
     )
     assert resp.status == 302 and resp.headers["Location"].startswith("/media?")
     assert grabbed == [("movie", 603, "g1", 7)]
+
+
+# -- inbound Seerr webhook -------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_webhook_rejects_bad_token(client):
+    cli, _store, _dash = client
+    resp = await cli.post(
+        "/webhook/seerr?token=wrong",
+        json={"notification_type": "MEDIA_AVAILABLE", "request": {"request_id": "10"}},
+    )
+    assert resp.status == 401
+    assert _dash.bot.notifications.requests == []
+
+
+@pytest.mark.asyncio
+async def test_webhook_media_triggers_request_check(client):
+    cli, _store, dash = client
+    resp = await cli.post(
+        "/webhook/seerr?token=hook-secret",
+        json={"notification_type": "MEDIA_AVAILABLE", "request": {"request_id": "10"}},
+    )
+    assert resp.status == 200
+    assert dash.bot.notifications.requests == [10]
+    assert dash.bot.notifications.issues == []
+
+
+@pytest.mark.asyncio
+async def test_webhook_issue_triggers_issue_check(client):
+    cli, _store, dash = client
+    # header auth also works
+    resp = await cli.post(
+        "/webhook/seerr",
+        headers={"X-Webhook-Token": "hook-secret"},
+        json={"notification_type": "ISSUE_RESOLVED", "issue": {"issue_id": "5"}},
+    )
+    assert resp.status == 200
+    assert dash.bot.notifications.issues == [5]
+    assert dash.bot.notifications.requests == []
+
+
+@pytest.mark.asyncio
+async def test_webhook_test_notification_is_noop(client):
+    cli, _store, dash = client
+    resp = await cli.post(
+        "/webhook/seerr?token=hook-secret",
+        json={"notification_type": "TEST_NOTIFICATION"},
+    )
+    assert resp.status == 200
+    assert dash.bot.notifications.requests == [] and dash.bot.notifications.issues == []
+
+
+@pytest.mark.asyncio
+async def test_webhook_secret_set_via_dashboard(client):
+    cli, store, dash = client
+    await cli.post("/login", data={"password": "secret"})
+
+    resp = await cli.post(
+        "/settings/webhook", data={"webhook_secret": "dash-secret"}, allow_redirects=False
+    )
+    assert resp.status == 302
+    assert await store.get_setting("webhook_secret") == "dash-secret"
+
+    # The new secret authenticates the webhook (the env default no longer works).
+    ok = await cli.post(
+        "/webhook/seerr?token=dash-secret",
+        json={"notification_type": "MEDIA_AVAILABLE", "request": {"request_id": "10"}},
+    )
+    assert ok.status == 200 and dash.bot.notifications.requests == [10]
+
+    old = await cli.post(
+        "/webhook/seerr?token=hook-secret",
+        json={"notification_type": "MEDIA_AVAILABLE", "request": {"request_id": "11"}},
+    )
+    assert old.status == 401
+
+
+@pytest.mark.asyncio
+async def test_webhook_clear_disables_even_with_env_secret(client):
+    cli, store, dash = client
+    await cli.post("/login", data={"password": "secret"})
+
+    resp = await cli.post(
+        "/settings/webhook", data={"clear": "on"}, allow_redirects=False
+    )
+    assert resp.status == 302
+    assert await store.get_setting("webhook_secret") == ""
+
+    # Stored empty string overrides the env default -> endpoint is disabled.
+    blocked = await cli.post(
+        "/webhook/seerr?token=hook-secret",
+        json={"notification_type": "MEDIA_AVAILABLE", "request": {"request_id": "10"}},
+    )
+    assert blocked.status == 401 and dash.bot.notifications.requests == []
+
+
+@pytest.mark.asyncio
+async def test_webhook_blank_keeps_existing_secret(client):
+    cli, store, _dash = client
+    await cli.post("/login", data={"password": "secret"})
+    await store.set_setting("webhook_secret", "keep-me")
+
+    await cli.post("/settings/webhook", data={"webhook_secret": ""}, allow_redirects=False)
+    assert await store.get_setting("webhook_secret") == "keep-me"
+
+
+@pytest.mark.asyncio
+async def test_settings_page_shows_webhook_card(client):
+    cli, store, _dash = client
+    await store.set_setting("webhook_secret", "shown-secret")
+    await cli.post("/login", data={"password": "secret"})
+
+    page = await cli.get("/settings")
+    body = await page.text()
+    assert "Seerr webhook" in body
+    assert "/webhook/seerr?token=shown-secret" in body  # ready-to-paste URL
+
+
+@pytest.mark.asyncio
+async def test_webhook_generate_creates_secret(client):
+    cli, store, _dash = client
+    await cli.post("/login", data={"password": "secret"})
+
+    resp = await cli.post(
+        "/settings/webhook", data={"action": "generate"}, allow_redirects=False
+    )
+    assert resp.status == 302
+    generated = await store.get_setting("webhook_secret")
+    assert generated and len(generated) >= 32  # strong random token
+
+    # The generated secret authenticates the webhook end-to-end.
+    ok = await cli.post(
+        f"/webhook/seerr?token={generated}",
+        json={"notification_type": "MEDIA_AVAILABLE", "request": {"request_id": "10"}},
+    )
+    assert ok.status == 200

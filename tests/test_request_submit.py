@@ -1,0 +1,90 @@
+from types import SimpleNamespace
+
+import pytest
+
+from vaultrequestrr.cogs.requests import RequestCog
+from vaultrequestrr.seerr import QuotaStatus, SearchResult, SeerrError, UserQuota
+
+
+def _quota(remaining):
+    q = QuotaStatus(limit=5, used=5 - remaining, remaining=remaining, restricted=remaining <= 0, days=7)
+    return UserQuota(movie=q, tv=q)
+
+
+class FakeSeerr:
+    def __init__(self, quota=None, quota_exc=None):
+        self._quota = quota
+        self._quota_exc = quota_exc
+        self.created = []
+
+    async def get_quota(self, user_id):
+        if self._quota_exc:
+            raise self._quota_exc
+        return self._quota
+
+    async def create_request(self, media_type, tmdb_id, *, user_id, seasons):
+        self.created.append((media_type, tmdb_id, user_id, seasons))
+        return {"id": 77}
+
+
+class FakeStore:
+    def __init__(self):
+        self.tracked = []
+
+    async def add_tracked_request(self, **kw):
+        self.tracked.append(kw)
+
+
+class FakeInteraction:
+    def __init__(self):
+        self.edits = []
+        self.followups = []
+        self.user = SimpleNamespace(id=42)
+
+    async def edit_original_response(self, **kw):
+        self.edits.append(kw)
+
+    @property
+    def followup(self):
+        interaction = self
+
+        class _F:
+            async def send(self, *a, **k):
+                interaction.followups.append((a, k))
+
+        return _F()
+
+
+def _cog(seerr, store):
+    bot = SimpleNamespace(seerr=seerr, store=store)
+    return RequestCog(bot)
+
+
+def _result():
+    return SearchResult("movie", 603, "The Matrix", "1999", "x", None, None)
+
+
+@pytest.mark.asyncio
+async def test_submit_blocks_when_out_of_quota():
+    seerr = FakeSeerr(quota=_quota(0))
+    cog = _cog(seerr, FakeStore())
+    inter = FakeInteraction()
+
+    await cog._submit(inter, "movie", _result(), None, user_id=7)
+
+    assert seerr.created == []  # never hit the API
+    assert inter.edits and inter.edits[0]["embed"].title == "⚠️ Out of quota"
+
+
+@pytest.mark.asyncio
+async def test_submit_proceeds_when_quota_lookup_fails():
+    seerr = FakeSeerr(quota_exc=SeerrError("boom"))
+    store = FakeStore()
+    cog = _cog(seerr, store)
+    inter = FakeInteraction()
+
+    await cog._submit(inter, "movie", _result(), None, user_id=7)
+
+    # A quota hiccup must not block a legitimate request.
+    assert seerr.created == [("movie", 603, 7, None)]
+    assert store.tracked and store.tracked[0]["request_id"] == 77

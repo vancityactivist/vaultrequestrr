@@ -1,12 +1,22 @@
+from types import SimpleNamespace
+
 from vaultrequestrr.cogs.requests import (
     MAX_SELECT_OPTIONS,
     ConfirmView,
     ResultSelect,
     ResultSelectView,
     SeasonSelectView,
+    _my_requests_embed,
     _PageButton,
 )
-from vaultrequestrr.seerr import STATUS_AVAILABLE, SearchResult, SeasonInfo, TvDetails
+from vaultrequestrr.seerr import (
+    REQUEST_DECLINED,
+    STATUS_AVAILABLE,
+    STATUS_PROCESSING,
+    SearchResult,
+    SeasonInfo,
+    TvDetails,
+)
 
 
 def _results(n):
@@ -92,3 +102,49 @@ def test_season_view_disabled_when_selecting_only_available():
     v.selected = [2]  # a missing season
     v.update_request_state()
     assert not v.request.disabled
+
+
+def test_season_view_disabled_when_all_requested():
+    details = TvDetails(3, "Show", [SeasonInfo(1, requested=True), SeasonInfo(2, requested=True)])
+    v = SeasonSelectView(None, _tv(), details)
+    assert v.request.disabled
+    assert v.request.label == "All seasons requested"
+
+
+def test_season_view_skips_already_requested_season():
+    details = TvDetails(3, "Show", [SeasonInfo(1, requested=True), SeasonInfo(2)])
+    v = SeasonSelectView(None, _tv(), details)
+
+    v.selected = [1]  # already requested -> nothing new to do
+    v.update_request_state()
+    assert v.request.disabled
+
+    v.selected = [2]  # not yet requested
+    v.update_request_state()
+    assert not v.request.disabled
+
+
+def _tracked(**kw):
+    base = dict(
+        request_id=1, discord_id="42", media_type="movie", tmdb_id=1, title="M",
+        seasons=None, request_status=None, media_status=None,
+        notified_available=False, notified_declined=False,
+        created_at="2026-06-18T00:00:00Z", updated_at=None,
+    )
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+def test_my_requests_embed_renders_statuses():
+    rows = [
+        _tracked(request_id=1, title="Avail", media_status=STATUS_AVAILABLE),
+        _tracked(request_id=2, title="Working", media_status=STATUS_PROCESSING),
+        _tracked(request_id=3, title="Nope", request_status=REQUEST_DECLINED),
+        _tracked(request_id=4, title="Show", media_type="tv", seasons="all"),
+    ]
+    desc = _my_requests_embed(rows).description
+    assert "✅ Available" in desc and "Avail" in desc
+    assert "⏳ Processing" in desc
+    assert "❌ Declined" in desc
+    assert "Show (all seasons)" in desc
+    assert "🕒 Requested" in desc  # the pending TV show

@@ -89,6 +89,9 @@ class FakeBot:
     async def fetch_user(self, user_id):
         return FakeUser(user_id, self.sent, self.embeds)
 
+    async def effective_webhook_secret(self):
+        return getattr(self, "webhook_secret", "")
+
 
 async def _track(store, request_id=10, media_type="movie", title="The Matrix"):
     await store.add_tracked_request(request_id, "42", media_type, 603, title, None)
@@ -203,6 +206,60 @@ async def test_resolved_issue_finalised_without_dm_when_off(store):
 
     assert bot.sent == []
     assert await store.pending_issues() == []  # still finalised
+
+
+@pytest.mark.asyncio
+async def test_poll_cadence_adapts_to_webhook(store):
+    bot = FakeBot(store, FakeSeerr())
+    bot.config = SimpleNamespace(poll_interval_seconds=600)
+    svc = NotificationService(bot)
+
+    # No webhook configured -> tight cadence so polling stays near-real-time.
+    bot.webhook_secret = ""
+    await svc._poll()
+    assert round(svc._loop.seconds) == 120
+
+    # Webhook configured -> relax to the configured backstop.
+    bot.webhook_secret = "abc"
+    await svc._poll()
+    assert round(svc._loop.seconds) == 600
+
+
+@pytest.mark.asyncio
+async def test_check_request_triggers_dm(store):
+    """The webhook entry point re-checks one request and notifies, like the poller."""
+    await _track(store)
+    info = RequestInfo(id=10, request_status=REQUEST_PENDING, media_status=STATUS_AVAILABLE, media_type="movie", tmdb_id=603)
+    bot = FakeBot(store, FakeSeerr(info))
+    svc = NotificationService(bot)
+
+    await svc.check_request(10)
+
+    assert bot.sent == [(42, "✅ Now available")]
+    assert await store.pending_tracked() == []  # finalised
+
+
+@pytest.mark.asyncio
+async def test_check_request_unknown_is_noop(store):
+    bot = FakeBot(store, FakeSeerr())
+    svc = NotificationService(bot)
+
+    await svc.check_request(999)  # not tracked
+
+    assert bot.sent == []
+
+
+@pytest.mark.asyncio
+async def test_check_issue_triggers_dm(store):
+    await store.add_tracked_issue(5, "42", "movie", 603, "The Matrix", ISSUE_VIDEO, "no subs", ISSUE_OPEN)
+    bot = FakeBot(store, FakeSeerr(issues=[_issue(status=ISSUE_RESOLVED)]))
+    svc = NotificationService(bot)
+
+    await svc.check_issue(5)
+
+    assert bot.sent == [(42, "🛠️ Issue resolved")]
+    one = await store.get_tracked_issue(5)
+    assert one.notified_resolved
 
 
 @pytest.mark.asyncio
