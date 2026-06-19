@@ -174,11 +174,7 @@ class WebDashboard:
         return web.json_response({"ok": True})
 
     async def _effective_webhook_secret(self) -> str:
-        """Dashboard-set secret wins; the env var is only the first-run default."""
-        stored = await self.bot.store.get_setting("webhook_secret")
-        if stored is not None:  # empty string = explicitly disabled via the UI
-            return stored
-        return self.bot.config.webhook_secret
+        return await self.bot.effective_webhook_secret()
 
     # -- pages -------------------------------------------------------------
 

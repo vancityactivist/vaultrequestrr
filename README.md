@@ -78,9 +78,11 @@ http://<vaultrequestrr-host>:<WEB_PORT>/webhook/seerr?token=<WEBHOOK_SECRET>
 ```
 
 (The default JSON payload works as-is — no template needed.) A background poller
-still runs as a reconciliation backstop on `POLL_INTERVAL_SECONDS` (default `600`),
-so notifications are never lost if a webhook is missed; without the webhook
-configured, the poller alone delivers them, just more slowly.
+also runs and **adapts to whether a webhook is configured**: with no webhook it
+polls every 2 minutes so polling-only setups stay near-real-time, and once a
+webhook is set it relaxes to the `POLL_INTERVAL_SECONDS` backstop (default `600`)
+since the webhook now carries delivery. Either way notifications are never lost if
+a webhook is missed. Set `POLL_INTERVAL_SECONDS=0` to disable polling entirely.
 
 ### Admin dashboard
 
@@ -210,7 +212,7 @@ is the optional admin dashboard (`5056`), which is served only when you set a
 | `DEFAULT_SEERR_USER_ID` | no | — | Fallback user id when linking is disabled |
 | `DATABASE_PATH` | no | `data/vaultrequestrr.sqlite3` | SQLite path for links |
 | `LOG_LEVEL` | no | `INFO` | `DEBUG`/`INFO`/`WARNING`/`ERROR` |
-| `POLL_INTERVAL_SECONDS` | no | `600` | Reconciliation poll interval; backstop to the webhook (0 disables) |
+| `POLL_INTERVAL_SECONDS` | no | `600` | Backstop poll interval; poller adapts to ~2 min with no webhook (0 disables) |
 | `NOTIFY_ON_AVAILABLE` | no | `true` | DM requester when media becomes available |
 | `NOTIFY_ON_DECLINED` | no | `true` | DM requester when a request is declined |
 | `NOTIFY_ON_ISSUE_RESOLVED` | no | `true` | DM reporter when their issue is resolved |

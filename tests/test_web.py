@@ -83,6 +83,12 @@ class FakeBot:
     async def apply_seerr_connection(self, url, key):
         self.applied = (url, key)
 
+    async def effective_webhook_secret(self):
+        stored = await self.store.get_setting("webhook_secret")
+        if stored is not None:
+            return stored
+        return self.config.webhook_secret
+
     async def plex_client_id(self):
         return "cid"
 

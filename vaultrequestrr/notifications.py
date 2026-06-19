@@ -25,12 +25,18 @@ from .store import TrackedIssue, TrackedRequest
 
 logger = logging.getLogger(__name__)
 
+# When no Seerr webhook is configured, polling is the only delivery path, so we
+# poll at this tighter cadence for near-real-time DMs. With a webhook set, the
+# poller relaxes to the (longer) configured POLL_INTERVAL_SECONDS as a backstop.
+ACTIVE_POLL_SECONDS = 120
+MIN_POLL_SECONDS = 30
+
 
 class NotificationService:
     def __init__(self, bot) -> None:  # type: ignore[no-untyped-def]
         self.bot = bot
-        interval = max(bot.config.poll_interval_seconds, 30)
-        self._loop = tasks.loop(seconds=interval)(self._poll)
+        # Start tight; the first poll re-evaluates and relaxes if a webhook exists.
+        self._loop = tasks.loop(seconds=self._floor(ACTIVE_POLL_SECONDS))(self._poll)
         self._loop.before_loop(self._before_loop)
 
     def start(self) -> None:
@@ -42,6 +48,26 @@ class NotificationService:
 
     async def _before_loop(self) -> None:
         await self.bot.wait_until_ready()
+
+    # -- adaptive cadence --------------------------------------------------
+
+    def _floor(self, seconds: int) -> int:
+        return max(seconds, MIN_POLL_SECONDS)
+
+    async def _target_interval(self) -> int:
+        """Tight when polling is the only delivery path; relaxed once a webhook exists."""
+        backstop = self._floor(self.bot.config.poll_interval_seconds)
+        try:
+            has_webhook = bool(await self.bot.effective_webhook_secret())
+        except Exception:  # noqa: BLE001 - never let cadence logic break the poll
+            has_webhook = False
+        return backstop if has_webhook else min(backstop, self._floor(ACTIVE_POLL_SECONDS))
+
+    async def _adapt_interval(self) -> None:
+        target = await self._target_interval()
+        if round(self._loop.seconds or 0) != target:
+            self._loop.change_interval(seconds=target)
+            logger.debug("Poll cadence set to %ds (webhook backstop adapts)", target)
 
     # -- targeted checks (used by the Seerr webhook for instant delivery) ----
 
@@ -87,6 +113,11 @@ class NotificationService:
             await self._poll_issues()
         except Exception:  # noqa: BLE001
             logger.exception("Failed to poll tracked issues")
+
+        try:
+            await self._adapt_interval()
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to adapt poll cadence")
 
     async def _check_one(self, tracked: TrackedRequest) -> None:
         runtime = self.bot.runtime
