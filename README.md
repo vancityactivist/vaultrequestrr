@@ -51,14 +51,18 @@ a single episode. Because Seerr's API attributes every API-key issue to the admi
 account, the real reporter is recorded in the issue message and tracked locally so
 the dashboard and resolution DMs know who filed it.
 
-When an issue is filed, VaultRequestrr **DMs every configured admin** (and posts to
-the **approvals channel**, if set) with a card carrying **Re-grab** and **Resolve**
+When an issue is filed, VaultRequestrr **DMs the configured issue handlers** (and posts
+to an optional **issue channel**) with a card carrying **Re-grab** and **Resolve**
 buttons — persistent, like the request buttons. **Re-grab** sets the title monitored,
 runs an interactive search and grabs a replacement (only deleting the existing file
 once a release is found), resolving the issue **only if a release is actually
 grabbed**; **Resolve** just marks it resolved. The same actions live on the dashboard
 **Issues** page. Re-grab is the fix for a bad/corrupt file: Radarr/Sonarr won't grab
 for an *unmonitored* item, so it ensures monitoring first.
+
+Who gets issue notifications (and can act on them) and which channel they post to are
+set on the dashboard **Settings → Approvals & Issues → Issue notifications** card —
+leave either field blank to reuse the request approvers / approvals channel.
 
 ### Approving requests
 
@@ -72,8 +76,9 @@ bot) or use the dashboard **Approvals** page. Approving/declining calls Seerr an
 requester is DM'd the outcome.
 
 Admins are a configured list of Discord user ids — set `ADMIN_DISCORD_IDS` or manage
-them on the dashboard **Settings → Approvals & admins** card (which also sets the
-approvals channel). That list gates `/pending`, the buttons, and who gets notified.
+them on the dashboard **Settings → Approvals & Issues → Request approvals** card (which
+also sets the approvals channel). That list gates `/pending`, the buttons, and who gets
+notified about requests.
 
 ### Inviting friends to Plex
 

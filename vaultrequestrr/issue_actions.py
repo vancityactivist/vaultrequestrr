@@ -93,8 +93,10 @@ async def act_regrab(
     Resolves the issue only when a release is actually grabbed; otherwise the
     card is left in place so an admin can retry or resolve manually.
     """
-    if not await bot.is_admin(interaction.user.id):
-        await interaction.response.send_message("⛔ You're not an approver.", ephemeral=True)
+    if not await bot.is_issue_handler(interaction.user.id):
+        await interaction.response.send_message(
+            "⛔ You're not set up to handle issues.", ephemeral=True
+        )
         return
 
     tracked = await bot.store.get_tracked_issue(issue_id)
@@ -142,8 +144,10 @@ async def act_resolve(
     issue_id: int,
 ) -> None:
     """Mark the issue resolved in Seerr, gated to admins."""
-    if not await bot.is_admin(interaction.user.id):
-        await interaction.response.send_message("⛔ You're not an approver.", ephemeral=True)
+    if not await bot.is_issue_handler(interaction.user.id):
+        await interaction.response.send_message(
+            "⛔ You're not set up to handle issues.", ephemeral=True
+        )
         return
 
     try:

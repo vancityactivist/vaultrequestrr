@@ -1013,5 +1013,23 @@ async def test_settings_page_shows_admins_card(client):
     await cli.post("/login", data={"password": "secret"})
     page = await cli.get("/settings")
     body = await page.text()
-    assert "Approvals &amp; admins" in body
+    assert "Request approvals" in body
     assert "111, 222" in body  # pre-filled
+
+
+@pytest.mark.asyncio
+async def test_issue_notification_settings_save_and_render(client):
+    cli, store, _dash = client
+    await cli.post("/login", data={"password": "secret"})
+
+    await cli.post(
+        "/settings/issues",
+        data={"issue_notify_discord_ids": "111, 222", "issues_channel_id": "999"},
+        allow_redirects=False,
+    )
+    assert await store.get_setting("issue_notify_discord_ids") == "111,222"
+    assert await store.get_setting("issues_channel_id") == "999"
+
+    body = await (await cli.get("/settings")).text()
+    assert "Issue notifications" in body
+    assert 'value="111,222"' in body  # pre-filled from the raw stored value
