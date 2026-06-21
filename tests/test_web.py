@@ -242,8 +242,8 @@ async def test_activity_shows_seerr_id_with_discord_hover(client):
     await cli.post("/login", data={"password": "secret"})
 
     body = await (await cli.get("/activity")).text()
-    assert "Seerr #7" in body                 # Seerr id shown, not the raw Discord id
-    assert "Discord ID: 999" in body          # revealed on hover
+    assert ">alice<" in body                   # Seerr account name shown, not the raw id
+    assert "Discord ID: 999 · Seerr #7" in body  # ids revealed on hover
     assert 'class="detailtoggle" data-id="1"' in body  # per-row details control
 
 

@@ -1694,7 +1694,8 @@ details.advanced>summary::before{content:"\\25B8";display:inline-block;margin-ri
 details.advanced[open]>summary::before{transform:rotate(90deg)}
 details.advanced .formrow{padding-bottom:8px}
 
-/* Activity details flyout */
+/* Activity requester + details flyout */
+.who{cursor:help;border-bottom:1px dotted var(--muted)}
 button.detailtoggle{background:transparent;border:1px solid var(--line);color:var(--muted);
   padding:5px 12px;font-size:12.5px;font-weight:600}
 button.detailtoggle:hover{border-color:var(--accent);color:var(--fg);filter:none}
@@ -1892,14 +1893,13 @@ def _status_badge(tracked) -> str:  # type: ignore[no-untyped-def]
 
 
 def _requester_cell(discord_id: str, link) -> str:  # type: ignore[no-untyped-def]
-    """Show the Seerr user id, with the Discord id on hover (falls back to Discord)."""
+    """Show the Seerr account name, with the Discord id on hover (falls back to Discord)."""
     if link is not None:
-        who = link.plex_username or link.email
-        label = f"Seerr #{link.seerr_user_id}"
-        tip = f"Discord ID: {discord_id}" + (f" · {who}" if who else "")
-        return f'<code title="{html.escape(tip)}">{html.escape(label)}</code>'
+        name = link.plex_username or link.email or f"Seerr #{link.seerr_user_id}"
+        tip = f"Discord ID: {discord_id} · Seerr #{link.seerr_user_id}"
+        return f'<span class="who" title="{html.escape(tip)}">{html.escape(name)}</span>'
     return (
-        f'<code title="Discord ID: {html.escape(discord_id)} · no linked Seerr account">'
+        f'<code class="who" title="Discord ID: {html.escape(discord_id)} · no linked Seerr account">'
         f'{html.escape(discord_id)}</code>'
     )
 
