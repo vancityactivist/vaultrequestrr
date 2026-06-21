@@ -145,11 +145,12 @@ class VaultRequestrr(commands.Bot):
     async def setup_hook(self) -> None:
         await self.store.connect()
 
-        # Register persistent approve/decline buttons so they keep working across
-        # restarts (an admin may act on a pending request hours later).
+        # Register persistent admin buttons so they keep working across restarts
+        # (an admin may act on a pending request or issue hours later).
         from .approvals import ApproveButton, DeclineButton
+        from .issue_actions import RegrabButton, ResolveButton
 
-        self.add_dynamic_items(ApproveButton, DeclineButton)
+        self.add_dynamic_items(ApproveButton, DeclineButton, RegrabButton, ResolveButton)
 
         # Persisted web-edited connection overrides env (env is the first-run default).
         url = await self.store.get_setting("seerr_url")

@@ -92,7 +92,39 @@ class NotificationService:
             requester_label=requester_label,
             seasons=seasons,
         )
+        await self._broadcast_to_admins(embeds, lambda: build_approval_view(request_id))
 
+    async def notify_issue_filed(
+        self,
+        issue_id: int,
+        *,
+        media_type: str | None,
+        tmdb_id: int | None,
+        title: str | None,
+        issue_type: int | None,
+        reporter_label: str | None,
+        season: int | None,
+        episode: int | None,
+        message: str | None,
+    ) -> None:
+        """Announce a freshly reported issue: DM each admin and post to the channel."""
+        from .issue_actions import build_issue_embeds, build_issue_view
+
+        embeds = await build_issue_embeds(
+            self.bot,
+            media_type=media_type,
+            tmdb_id=tmdb_id,
+            title=title,
+            issue_type=issue_type,
+            reporter_label=reporter_label,
+            season=season,
+            episode=episode,
+            message=message,
+        )
+        await self._broadcast_to_admins(embeds, lambda: build_issue_view(issue_id))
+
+    async def _broadcast_to_admins(self, embeds, make_view) -> None:  # type: ignore[no-untyped-def]
+        """DM each admin and post to the approvals channel; a fresh view per send."""
         for admin_id in await self.bot.admin_ids():
             try:
                 user = await self.bot.fetch_user(admin_id)
@@ -100,7 +132,7 @@ class NotificationService:
                 logger.warning("Could not resolve admin %s: %s", admin_id, exc)
                 continue
             try:
-                await user.send(embeds=embeds, view=build_approval_view(request_id))
+                await user.send(embeds=embeds, view=make_view())
             except discord.Forbidden:
                 logger.info("Admin %s has DMs disabled; skipping", admin_id)
             except discord.HTTPException as exc:
@@ -112,7 +144,7 @@ class NotificationService:
                 channel = self.bot.get_channel(channel_id) or await self.bot.fetch_channel(
                     channel_id
                 )
-                await channel.send(embeds=embeds, view=build_approval_view(request_id))
+                await channel.send(embeds=embeds, view=make_view())
             except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
                 logger.warning("Could not post to approvals channel %s: %s", channel_id, exc)
 

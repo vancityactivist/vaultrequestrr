@@ -51,6 +51,15 @@ a single episode. Because Seerr's API attributes every API-key issue to the admi
 account, the real reporter is recorded in the issue message and tracked locally so
 the dashboard and resolution DMs know who filed it.
 
+When an issue is filed, VaultRequestrr **DMs every configured admin** (and posts to
+the **approvals channel**, if set) with a card carrying **Re-grab** and **Resolve**
+buttons — persistent, like the request buttons. **Re-grab** sets the title monitored,
+runs an interactive search and grabs a replacement (only deleting the existing file
+once a release is found), resolving the issue **only if a release is actually
+grabbed**; **Resolve** just marks it resolved. The same actions live on the dashboard
+**Issues** page. Re-grab is the fix for a bad/corrupt file: Radarr/Sonarr won't grab
+for an *unmonitored* item, so it ensures monitoring first.
+
 ### Approving requests
 
 Seerr only auto-fulfils requests for users with the *auto-approve* permission;

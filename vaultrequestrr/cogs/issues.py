@@ -129,6 +129,18 @@ class IssueCog(commands.Cog):
                 problem_season=season,
                 problem_episode=episode,
             )
+            # Ping admins (DM + approvals channel) with Re-grab / Resolve buttons.
+            await self.bot.notifications.notify_issue_filed(
+                int(issue_id),
+                media_type=result.media_type,
+                tmdb_id=result.tmdb_id,
+                title=result.title,
+                issue_type=issue_type,
+                reporter_label=reporter,
+                season=season,
+                episode=episode,
+                message=detail,
+            )
 
         await interaction.edit_original_response(
             content=None,
