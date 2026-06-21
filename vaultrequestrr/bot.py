@@ -71,6 +71,47 @@ class VaultRequestrr(commands.Bot):
             return int(stored) if stored.strip().isdigit() else None
         return self.config.approvals_channel_id
 
+    async def _anime_setting(self, key: str, env_default: int | str | None) -> int | str | None:
+        """Resolve one anime-routing value: dashboard-set wins, env is the default.
+
+        A stored empty string means "explicitly cleared" and overrides the env var.
+        """
+        stored = await self.store.get_setting(key)
+        if stored is not None:
+            stored = stored.strip()
+            if not stored:
+                return None
+            if key.endswith(("_server_id", "_profile_id")):
+                return int(stored) if stored.isdigit() else None
+            return stored
+        return env_default
+
+    async def anime_routing(self, media_type: str) -> dict[str, object] | None:
+        """`create_request` override kwargs for an anime request, or None if unconfigured.
+
+        Returns only the keys that are set, with `server_id` being mandatory — without
+        a target instance there's nothing to route, so the /anime flow treats None as
+        "anime not set up for this media type" and falls back to normal routing.
+        """
+        kind = "sonarr" if media_type == "tv" else "radarr"
+        server_id = await self._anime_setting(
+            f"anime_{kind}_server_id", getattr(self.config, f"anime_{kind}_server_id")
+        )
+        if server_id is None:
+            return None
+        override: dict[str, object] = {"server_id": server_id}
+        profile_id = await self._anime_setting(
+            f"anime_{kind}_profile_id", getattr(self.config, f"anime_{kind}_profile_id")
+        )
+        if profile_id is not None:
+            override["profile_id"] = profile_id
+        root_folder = await self._anime_setting(
+            f"anime_{kind}_root_folder", getattr(self.config, f"anime_{kind}_root_folder")
+        )
+        if root_folder is not None:
+            override["root_folder"] = root_folder
+        return override
+
     async def plex_client_id(self) -> str:
         """Stable Plex client identifier, generated once and persisted."""
         client_id = await self.store.get_setting("plex_client_id")

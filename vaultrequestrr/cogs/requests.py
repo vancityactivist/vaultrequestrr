@@ -57,6 +57,15 @@ class RequestCog(commands.Cog):
     async def tv(self, interaction: discord.Interaction, title: str) -> None:
         await self._start_search(interaction, "tv", title)
 
+    @app_commands.command(
+        name="anime", description="Request anime (routed to the anime library)"
+    )
+    @app_commands.describe(title="The anime title to search for")
+    async def anime(self, interaction: discord.Interaction, title: str) -> None:
+        # "anime" is a UI mode, not a real Seerr media type: it searches both
+        # movies and series and routes each pick to the configured anime instance.
+        await self._start_search(interaction, "anime", title, anime=True)
+
     @app_commands.command(name="linkstatus", description="Show your linked Plex/Seerr account")
     async def linkstatus(self, interaction: discord.Interaction) -> None:
         link = await self.bot.linker.get_link(str(interaction.user.id))
@@ -174,7 +183,8 @@ class RequestCog(commands.Cog):
     # -- search entry point ------------------------------------------------
 
     async def _start_search(
-        self, interaction: discord.Interaction, media_type: str, title: str
+        self, interaction: discord.Interaction, media_type: str, title: str,
+        *, anime: bool = False,
     ) -> None:
         """Apply the link gate first, then run the search.
 
@@ -187,30 +197,49 @@ class RequestCog(commands.Cog):
             if link is None:
                 # First interaction ever: link, then the modal continues the search.
                 await interaction.response.send_modal(
-                    PlexLinkModal(self, continue_search=(media_type, title))
+                    PlexLinkModal(self, continue_search=(media_type, title, anime))
                 )
                 return
-        await self._run_search(interaction, media_type, title)
+        await self._run_search(interaction, media_type, title, anime=anime)
 
     async def _run_search(
-        self, interaction: discord.Interaction, media_type: str, title: str
+        self, interaction: discord.Interaction, media_type: str, title: str,
+        *, anime: bool = False,
     ) -> None:
         """Search Seerr and show the result picker. Assumes the link gate passed."""
+        if anime and await self.bot.anime_routing("tv") is None and await self.bot.anime_routing("movie") is None:
+            await interaction.response.send_message(
+                "🚧 Anime requests aren't set up yet. An admin can configure the anime "
+                "Sonarr/Radarr instance on the dashboard's Settings page.",
+                ephemeral=True,
+            )
+            return
+
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
-            results = await self.bot.seerr.search(title, media_type)
+            if anime:
+                # Anime can be a series or a film — search both and route per pick.
+                tv_results = await self.bot.seerr.search(title, "tv")
+                movie_results = await self.bot.seerr.search(title, "movie")
+                results = tv_results + movie_results
+            else:
+                results = await self.bot.seerr.search(title, media_type)
         except SeerrError as exc:
             await interaction.followup.send(f"⚠️ {exc}", ephemeral=True)
             return
 
         if not results:
+            if anime:
+                noun = "anime"
+            else:
+                noun = "movies" if media_type == "movie" else "TV shows"
             await interaction.followup.send(
-                f"No {('movies' if media_type == 'movie' else 'TV shows')} found for **{title}**.",
+                f"No {noun} found for **{title}**.",
                 ephemeral=True,
             )
             return
 
-        view = ResultSelectView(self, media_type, results)
+        view = ResultSelectView(self, media_type, results, anime=anime)
         suffix = f" — {view.page_label()}" if len(results) > MAX_SELECT_OPTIONS else ""
         await interaction.followup.send(
             f"Found {len(results)} result(s) for **{title}**, pick one{suffix}:",
@@ -226,6 +255,8 @@ class RequestCog(commands.Cog):
         media_type: str,
         result: SearchResult,
         seasons: list[int] | str | None,
+        *,
+        anime: bool = False,
     ) -> None:
         """Entry from a Request button: apply the link gate, then submit."""
         discord_id = str(interaction.user.id)
@@ -236,7 +267,7 @@ class RequestCog(commands.Cog):
                 # Fallback gate: normally the user is linked at search time, but
                 # this still covers require_linking being toggled on mid-session.
                 await interaction.response.send_modal(
-                    PlexLinkModal(self, continue_request=(media_type, result, seasons))
+                    PlexLinkModal(self, continue_request=(media_type, result, seasons, anime))
                 )
                 return
             user_id = link.seerr_user_id
@@ -246,7 +277,7 @@ class RequestCog(commands.Cog):
         # Deferred *update* (no new "thinking" message): we'll edit the picker
         # message in place with the result.
         await interaction.response.defer()
-        await self._submit(interaction, media_type, result, seasons, user_id)
+        await self._submit(interaction, media_type, result, seasons, user_id, anime=anime)
 
     async def _submit(
         self,
@@ -255,6 +286,8 @@ class RequestCog(commands.Cog):
         result: SearchResult,
         seasons: list[int] | str | None,
         user_id: int | None,
+        *,
+        anime: bool = False,
     ) -> None:
         """Submit the request to Seerr. Assumes the interaction is deferred."""
         # Best-effort quota pre-check: catch an out-of-quota user before the API
@@ -281,12 +314,18 @@ class RequestCog(commands.Cog):
             except SeerrError:
                 pass  # never block a request because the quota lookup failed
 
+        # Anime requests get routed to the dedicated anime instance. If it isn't
+        # configured for this media type, fall through to Seerr's default routing.
+        override = await self.bot.anime_routing(media_type) if anime else None
+        routed_anime = override is not None
+
         try:
             created = await self.bot.seerr.create_request(
                 media_type,
                 result.tmdb_id,
                 user_id=user_id,
                 seasons=seasons,
+                **(override or {}),
             )
         except SeerrError as exc:
             # Keep the picker so the user can retry; report the error separately.
@@ -321,6 +360,8 @@ class RequestCog(commands.Cog):
 
         embeds = _success_embeds(result, seasons)
         body = embeds[-1]  # the details embed sits below the poster banner
+        if routed_anime:
+            body.add_field(name="Library", value="🎌 Anime", inline=False)
         if pending:
             body.add_field(
                 name="Status", value="⏳ Pending admin approval", inline=False
@@ -343,10 +384,14 @@ class RequestCog(commands.Cog):
 
 
 class ResultSelectView(discord.ui.View):
-    def __init__(self, cog: RequestCog, media_type: str, results: list[SearchResult]) -> None:
+    def __init__(
+        self, cog: RequestCog, media_type: str, results: list[SearchResult],
+        *, anime: bool = False,
+    ) -> None:
         super().__init__(timeout=INTERACTION_TIMEOUT)
         self._cog = cog
         self._media_type = media_type
+        self._anime = anime
         self._results = results
         self._page = 0
         self._render()
@@ -359,7 +404,7 @@ class ResultSelectView(discord.ui.View):
         self.clear_items()
         start = self._page * MAX_SELECT_OPTIONS
         page_results = self._results[start : start + MAX_SELECT_OPTIONS]
-        self.add_item(ResultSelect(self._cog, self._media_type, page_results))
+        self.add_item(ResultSelect(self._cog, self._media_type, page_results, anime=self._anime))
         if len(self._results) > MAX_SELECT_OPTIONS:
             self.add_item(_PageButton(-1, "◀ Prev", disabled=self._page == 0))
             self.add_item(_PageButton(+1, "Next ▶", disabled=self._page >= self._max_page))
@@ -383,9 +428,13 @@ class _PageButton(discord.ui.Button):
 
 
 class ResultSelect(discord.ui.Select):
-    def __init__(self, cog: RequestCog, media_type: str, results: list[SearchResult]) -> None:
+    def __init__(
+        self, cog: RequestCog, media_type: str, results: list[SearchResult],
+        *, anime: bool = False,
+    ) -> None:
         self._cog = cog
         self._media_type = media_type
+        self._anime = anime
         # De-duplicate by tmdb id so the select never has duplicate option values.
         unique: list[SearchResult] = []
         seen: set[int] = set()
@@ -415,9 +464,12 @@ class ResultSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         result = self._results[self.values[0]]
+        # Branch on the result's own type, not the view's: in anime mode the list
+        # mixes movies and series, so each pick drives its own flow.
+        media_type = result.media_type
 
-        if self._media_type == "movie":
-            view = ConfirmView(self._cog, "movie", result, seasons=None)
+        if media_type == "movie":
+            view = ConfirmView(self._cog, "movie", result, seasons=None, anime=self._anime)
             await interaction.response.edit_message(
                 content=None, embed=_media_embed(result), view=view
             )
@@ -435,23 +487,27 @@ class ResultSelect(discord.ui.Select):
 
         if not details.seasons:
             # No discrete seasons — request the whole show.
-            view = ConfirmView(self._cog, "tv", result, seasons="all")
+            view = ConfirmView(self._cog, "tv", result, seasons="all", anime=self._anime)
             await interaction.edit_original_response(
                 content=None, embed=_media_embed(result), view=view
             )
             return
 
-        view = SeasonSelectView(self._cog, result, details)
+        view = SeasonSelectView(self._cog, result, details, anime=self._anime)
         await interaction.edit_original_response(
             content=None, embed=_media_embed(result), view=view
         )
 
 
 class SeasonSelectView(discord.ui.View):
-    def __init__(self, cog: RequestCog, result: SearchResult, details: TvDetails) -> None:
+    def __init__(
+        self, cog: RequestCog, result: SearchResult, details: TvDetails,
+        *, anime: bool = False,
+    ) -> None:
         super().__init__(timeout=INTERACTION_TIMEOUT)
         self._cog = cog
         self._result = result
+        self._anime = anime
         self.selected: list[int] | str = "all"
         self._available = {s.season_number for s in details.seasons if s.available}
         self._requested = {s.season_number for s in details.seasons if s.requested}
@@ -479,7 +535,9 @@ class SeasonSelectView(discord.ui.View):
 
     @discord.ui.button(label="Request", style=discord.ButtonStyle.success, row=1)
     async def request(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
-        await self._cog.handle_request(interaction, "tv", self._result, self.selected)
+        await self._cog.handle_request(
+            interaction, "tv", self._result, self.selected, anime=self._anime
+        )
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, row=1)
     async def cancel(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
@@ -529,12 +587,15 @@ class ConfirmView(discord.ui.View):
         media_type: str,
         result: SearchResult,
         seasons: list[int] | str | None,
+        *,
+        anime: bool = False,
     ) -> None:
         super().__init__(timeout=INTERACTION_TIMEOUT)
         self._cog = cog
         self._media_type = media_type
         self._result = result
         self._seasons = seasons
+        self._anime = anime
 
         # Nothing to request if it's already fully available or pending — grey out the button.
         if result.available:
@@ -546,7 +607,9 @@ class ConfirmView(discord.ui.View):
 
     @discord.ui.button(label="Request", style=discord.ButtonStyle.success)
     async def request(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
-        await self._cog.handle_request(interaction, self._media_type, self._result, self._seasons)
+        await self._cog.handle_request(
+            interaction, self._media_type, self._result, self._seasons, anime=self._anime
+        )
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
@@ -565,8 +628,8 @@ class PlexLinkModal(discord.ui.Modal, title="Link your Plex account"):
         self,
         cog: RequestCog,
         *,
-        continue_search: tuple[str, str] | None = None,
-        continue_request: tuple[str, SearchResult, list[int] | str | None] | None = None,
+        continue_search: tuple[str, str, bool] | None = None,
+        continue_request: tuple[str, SearchResult, list[int] | str | None, bool] | None = None,
     ) -> None:
         super().__init__()
         self._cog = cog
@@ -580,14 +643,15 @@ class PlexLinkModal(discord.ui.Modal, title="Link your Plex account"):
 
         if result.status is LinkStatus.LINKED:
             if self._continue_search is not None:
-                media_type, title = self._continue_search
-                await self._cog._run_search(interaction, media_type, title)
+                media_type, title, anime = self._continue_search
+                await self._cog._run_search(interaction, media_type, title, anime=anime)
             else:
-                media_type, search_result, seasons = self._continue_request
+                media_type, search_result, seasons, anime = self._continue_request
                 # Deferred *update* so _submit can edit the picker message in place.
                 await interaction.response.defer()
                 await self._cog._submit(
-                    interaction, media_type, search_result, seasons, result.user.id
+                    interaction, media_type, search_result, seasons, result.user.id,
+                    anime=anime,
                 )
             return
 

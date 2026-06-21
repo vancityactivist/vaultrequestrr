@@ -17,14 +17,16 @@ class FakeSeerr:
         self._quota_exc = quota_exc
         self._created_status = created_status
         self.created = []
+        self.overrides = []
 
     async def get_quota(self, user_id):
         if self._quota_exc:
             raise self._quota_exc
         return self._quota
 
-    async def create_request(self, media_type, tmdb_id, *, user_id, seasons):
+    async def create_request(self, media_type, tmdb_id, *, user_id, seasons, **overrides):
         self.created.append((media_type, tmdb_id, user_id, seasons))
+        self.overrides.append(overrides)
         out = {"id": 77}
         if self._created_status is not None:
             out["status"] = self._created_status
@@ -67,8 +69,13 @@ class FakeInteraction:
         return _F()
 
 
-def _cog(seerr, store, notifications=None):
-    bot = SimpleNamespace(seerr=seerr, store=store, notifications=notifications)
+def _cog(seerr, store, notifications=None, anime_routing=None):
+    async def _routing(media_type):
+        return anime_routing.get(media_type) if anime_routing else None
+
+    bot = SimpleNamespace(
+        seerr=seerr, store=store, notifications=notifications, anime_routing=_routing
+    )
     return RequestCog(bot)
 
 
@@ -125,3 +132,40 @@ async def test_submit_auto_approved_does_not_notify():
     await cog._submit(inter, "movie", _result(), None, user_id=7)
 
     assert notif.pending == []
+
+
+@pytest.mark.asyncio
+async def test_submit_non_anime_sends_no_routing_overrides():
+    seerr = FakeSeerr(quota=_quota(3))
+    cog = _cog(seerr, FakeStore(), anime_routing={"tv": {"server_id": 2}})
+    inter = FakeInteraction()
+
+    await cog._submit(inter, "movie", _result(), None, user_id=7)
+
+    assert seerr.overrides == [{}]  # anime_routing never consulted for a normal request
+
+
+@pytest.mark.asyncio
+async def test_submit_anime_forwards_routing_overrides():
+    seerr = FakeSeerr(quota=_quota(3))
+    routing = {"tv": {"server_id": 2, "profile_id": 7}}
+    cog = _cog(seerr, FakeStore(), anime_routing=routing)
+    inter = FakeInteraction()
+    result = SearchResult("tv", 1399, "Naruto", "2002", "x", None, None)
+
+    await cog._submit(inter, "tv", result, "all", user_id=7, anime=True)
+
+    assert seerr.overrides == [{"server_id": 2, "profile_id": 7}]
+
+
+@pytest.mark.asyncio
+async def test_submit_anime_unconfigured_falls_back_to_default_routing():
+    seerr = FakeSeerr(quota=_quota(3))
+    # Only Sonarr configured; an anime *movie* has no Radarr routing → no overrides.
+    cog = _cog(seerr, FakeStore(), anime_routing={"tv": {"server_id": 2}})
+    inter = FakeInteraction()
+
+    await cog._submit(inter, "movie", _result(), None, user_id=7, anime=True)
+
+    assert seerr.created == [("movie", 603, 7, None)]
+    assert seerr.overrides == [{}]

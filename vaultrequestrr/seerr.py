@@ -448,8 +448,20 @@ class SeerrClient:
         user_id: int | None = None,
         seasons: Sequence[int] | str | None = None,
         is_4k: bool = False,
+        server_id: int | None = None,
+        profile_id: int | None = None,
+        root_folder: str | None = None,
+        language_profile_id: int | None = None,
+        tags: list[int] | None = None,
     ) -> dict[str, Any]:
-        """Create a request, attributed to `user_id` so their quota applies."""
+        """Create a request, attributed to `user_id` so their quota applies.
+
+        The optional `server_id` / `profile_id` / `root_folder` / `language_profile_id`
+        / `tags` overrides pin the request to a specific configured Radarr/Sonarr
+        instance — used for anime routing. Sending only `server_id` lets Seerr still
+        apply that server's anime-aware profile/root and series type; the others are
+        advanced overrides that bypass it. Omitted fields fall back to Seerr's defaults.
+        """
         body: dict[str, Any] = {
             "mediaType": media_type,
             "mediaId": tmdb_id,
@@ -459,6 +471,16 @@ class SeerrClient:
             body["userId"] = user_id
         if media_type == "tv":
             body["seasons"] = list(seasons) if isinstance(seasons, Iterable) and not isinstance(seasons, str) else (seasons or "all")
+        if server_id is not None:
+            body["serverId"] = server_id
+        if profile_id is not None:
+            body["profileId"] = profile_id
+        if root_folder is not None:
+            body["rootFolder"] = root_folder
+        if language_profile_id is not None:
+            body["languageProfileId"] = language_profile_id
+        if tags is not None:
+            body["tags"] = tags
 
         return await self._post("request", body)
 
