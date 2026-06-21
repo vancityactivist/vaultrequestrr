@@ -185,6 +185,46 @@ async def test_create_tv_request_defaults_to_all_seasons():
     assert captured["body"]["seasons"] == "all"
 
 
+@pytest.mark.asyncio
+async def test_create_request_includes_routing_overrides():
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(201, json={"id": 5})
+
+    client = make_client(handler)
+    try:
+        await client.create_request(
+            "tv", 1399, user_id=3, seasons="all",
+            server_id=2, profile_id=7, root_folder="/tv/anime",
+        )
+    finally:
+        await client.aclose()
+
+    assert captured["body"]["serverId"] == 2
+    assert captured["body"]["profileId"] == 7
+    assert captured["body"]["rootFolder"] == "/tv/anime"
+
+
+@pytest.mark.asyncio
+async def test_create_request_omits_unset_routing_overrides():
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(201, json={"id": 6})
+
+    client = make_client(handler)
+    try:
+        await client.create_request("movie", 603, user_id=7)
+    finally:
+        await client.aclose()
+
+    for field in ("serverId", "profileId", "rootFolder", "languageProfileId", "tags"):
+        assert field not in captured["body"]
+
+
 # -- add_discord_id merge --------------------------------------------------
 
 

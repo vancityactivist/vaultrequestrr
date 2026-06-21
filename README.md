@@ -77,6 +77,27 @@ per-user on the Links page). Connect Plex from the Settings page with **Login
 with Plex** (PIN OAuth — no token to copy), then pick which server and which
 libraries to share. Sent invites are listed on the dashboard **Invites** page.
 
+### Anime requests
+
+`/anime <title>` is a separate category that routes anime to dedicated Sonarr/Radarr
+instances — handy if you keep anime on its own library (the way Requestrr does it). It
+searches both series and films and sends each pick to the matching anime instance.
+
+Configure it on the dashboard **Settings → Anime routing** card (or via the
+`ANIME_SONARR_SERVER_ID` / `ANIME_RADARR_SERVER_ID` env vars). Enter the **Seerr instance
+id** of your anime Sonarr/Radarr — the card lists the configured instances and their ids, or
+find them in Seerr under **Settings → Services**. Setting a server id is what enables
+`/anime` for that media type; with neither set, the command tells the user it isn't
+configured. Profile id and root folder are optional advanced overrides — leave them blank to
+let Seerr apply that instance's own anime quality profile / root folder.
+
+**Prerequisites & caveats:** the anime Sonarr/Radarr instance must already be set up in Seerr
+(ideally with its **Anime Quality Profile** / **Anime Root Folder**). The bot only selects
+*which* instance a request goes to — whether a series is added as **anime** (absolute episode
+numbering) is decided by Seerr's own anime detection (a TMDB keyword), not the bot. A title
+Seerr doesn't recognise as anime will land as a standard series even on the anime instance;
+fix it by adding the TMDB "anime" keyword or correcting the series type in Sonarr.
+
 ### Notifications
 
 The bot **DMs the requester** when their request becomes available or is declined,
@@ -141,6 +162,7 @@ Commands:
 | --- | --- |
 | `/movie <title>` | Search for and request a movie |
 | `/tv <title>` | Search for and request a TV show (with season selection) |
+| `/anime <title>` | Search anime (series and films) and route it to the anime library (when configured) |
 | `/issue <title>` | Report a Video/Audio/Subtitle/Other problem with media on the server |
 | `/invite` | Invite a friend to Plex by email (linked users; admin-enabled) |
 | `/quota` | Show your remaining request quota and when it resets |
@@ -239,6 +261,10 @@ is the optional admin dashboard (`5056`), which is served only when you set a
 | `WEBHOOK_SECRET` | no | — | Shared secret for the inbound Seerr webhook (blank = endpoint disabled) |
 | `ADMIN_DISCORD_IDS` | no | — | Comma-separated Discord ids that can approve requests and get notified |
 | `APPROVALS_CHANNEL_ID` | no | — | Optional channel id to also post pending requests to |
+| `ANIME_SONARR_SERVER_ID` | no | — | Seerr Sonarr instance id for `/anime` series (blank = disabled) |
+| `ANIME_RADARR_SERVER_ID` | no | — | Seerr Radarr instance id for `/anime` films (blank = disabled) |
+| `ANIME_SONARR_PROFILE_ID` / `ANIME_SONARR_ROOT_FOLDER` | no | — | Optional anime Sonarr profile id / root folder override |
+| `ANIME_RADARR_PROFILE_ID` / `ANIME_RADARR_ROOT_FOLDER` | no | — | Optional anime Radarr profile id / root folder override |
 
 ## Development
 

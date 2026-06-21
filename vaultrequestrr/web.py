@@ -11,6 +11,7 @@ import html
 import logging
 import secrets
 from datetime import datetime
+from pathlib import Path
 
 from aiohttp import web
 
@@ -51,6 +52,7 @@ class WebDashboard:
                 web.get("/login", self.login_page),
                 web.post("/login", self.login_submit),
                 web.get("/logout", self.logout),
+                web.get("/icon.png", self.icon),
                 web.get("/", self.home),
                 web.get("/links", self.links_page),
                 web.post("/links/unlink", self.unlink_action),
@@ -75,6 +77,7 @@ class WebDashboard:
                 web.post("/settings/connection", self.connection_action),
                 web.post("/settings/webhook", self.webhook_action),
                 web.post("/settings/admins", self.admins_action),
+                web.post("/settings/anime", self.anime_action),
                 web.post("/settings/arr/add", self.arr_add_action),
                 web.post("/settings/arr/update", self.arr_update_action),
                 web.post("/settings/arr/delete", self.arr_delete_action),
@@ -104,7 +107,8 @@ class WebDashboard:
     @web.middleware
     async def _auth_middleware(self, request: web.Request, handler):
         # The webhook authenticates with its own shared secret, not the session.
-        if request.path in ("/login", "/webhook/seerr"):
+        # The logo is public so it loads on the login page too.
+        if request.path in ("/login", "/webhook/seerr", "/icon.png"):
             return await handler(request)
         token = request.cookies.get(COOKIE)
         if token and token in self._sessions:
@@ -144,6 +148,14 @@ class WebDashboard:
         response = web.HTTPFound("/login")
         response.del_cookie(COOKIE)
         raise response
+
+    async def icon(self, request: web.Request) -> web.StreamResponse:
+        """Serve the VaultRequestrr logo (used for the favicon and sidebar brand)."""
+        if not _LOGO_PATH.is_file():
+            raise web.HTTPNotFound()
+        return web.FileResponse(
+            _LOGO_PATH, headers={"Cache-Control": "public, max-age=86400"}
+        )
 
     # -- webhook -----------------------------------------------------------
 
@@ -545,14 +557,12 @@ class WebDashboard:
 
         webhook_secret = await self._effective_webhook_secret()
         webhook_card = self._webhook_card(request, webhook_secret)
-
         admins_card = await self._admins_card()
-
+        anime_card = await self._anime_card()
         arr_card = await self._arr_card()
         plex_card = await self._plex_card()
 
-        body = f"""
-        {_flash(request)}
+        seerr_card = f"""
         <div class="card">
           <h2>Seerr connection</h2>
           <form method="post" action="/settings/connection">
@@ -567,14 +577,11 @@ class WebDashboard:
           <p class="muted small">The connection is validated before saving, then applied
             immediately. Stored in the database and kept across restarts (environment
             variables are only the first-run default).</p>
-        </div>
+        </div>"""
 
-        {webhook_card}
-
-        {admins_card}
-
+        bot_card = f"""
         <div class="card">
-          <h2>Bot settings</h2>
+          <h2>Bot behaviour</h2>
           <form method="post" action="/settings">
             <label class="check"><input type="checkbox" name="require_linking" {_checked(rt.require_linking)}> Require Plex linking before first request</label>
             <label class="check"><input type="checkbox" name="notify_on_available" {_checked(rt.notify_on_available)}> DM users when media becomes available</label>
@@ -586,11 +593,33 @@ class WebDashboard:
             <button type="submit">Save settings</button>
           </form>
           <p class="muted small">These apply immediately but reset to env defaults on restart.</p>
+        </div>"""
+
+        # Grouped into tabs so the page reads as sections rather than one long
+        # scroll. Falls back to a flat stack when JS is off (see _SETTINGS_TABS_JS).
+        tabs = [
+            ("general", "General", "settings", seerr_card + bot_card),
+            ("approvals", "Approvals", "approvals", admins_card),
+            ("notifications", "Notifications", "mail", webhook_card),
+            ("services", "Services", "server", arr_card + anime_card),
+            ("plex", "Plex", "link", plex_card),
+        ]
+        subnav = "".join(
+            f'<a class="subtab" data-tab="{tab}" href="#{tab}">{_icon(icon, 16)}<span>{label}</span></a>'
+            for tab, label, icon, _ in tabs
+        )
+        panels = "".join(
+            f'<section class="panel" id="{tab}" data-panel="{tab}">{cards}</section>'
+            for tab, _, _, cards in tabs
+        )
+
+        body = f"""
+        {_flash(request)}
+        <div class="settings" id="settings">
+          <nav class="subnav">{subnav}</nav>
+          {panels}
         </div>
-
-        {plex_card}
-
-        {arr_card}
+        {_SETTINGS_TABS_JS}
         """
         return _html(_layout("Settings", body))
 
@@ -654,6 +683,104 @@ class WebDashboard:
             env vars are only the first-run default).</p>
         </div>
         """
+
+    async def _anime_card(self) -> str:
+        """Route /anime requests to dedicated Sonarr/Radarr instances in Seerr."""
+        async def _val(key: str, env_default: object) -> str:
+            value = await self.bot._anime_setting(key, env_default)
+            return "" if value is None else str(value)
+
+        cfg = self.bot.config
+        sonarr_server = await _val("anime_sonarr_server_id", cfg.anime_sonarr_server_id)
+        sonarr_profile = await _val("anime_sonarr_profile_id", cfg.anime_sonarr_profile_id)
+        sonarr_root = await _val("anime_sonarr_root_folder", cfg.anime_sonarr_root_folder)
+        radarr_server = await _val("anime_radarr_server_id", cfg.anime_radarr_server_id)
+        radarr_profile = await _val("anime_radarr_profile_id", cfg.anime_radarr_profile_id)
+        radarr_root = await _val("anime_radarr_root_folder", cfg.anime_radarr_root_folder)
+
+        sonarr_select = await self._anime_server_select("sonarr", sonarr_server)
+        radarr_select = await self._anime_server_select("radarr", radarr_server)
+
+        return f"""
+        <div class="card">
+          <h2>Anime routing</h2>
+          <p class="muted small">Pick the Seerr instance <code>/anime</code> requests go to —
+            series to Sonarr, films to Radarr. Choose <em>Disabled</em> to turn <code>/anime</code>
+            off for that media type. Leave the advanced overrides blank to let Seerr apply that
+            instance's own anime quality profile / root folder and (for series) the anime series type.</p>
+          <form method="post" action="/settings/anime">
+            <h3 class="subhead">Anime series → Sonarr</h3>
+            <label class="field">Sonarr instance
+              <select name="anime_sonarr_server_id">{sonarr_select}</select>
+            </label>
+            <h3 class="subhead">Anime films → Radarr</h3>
+            <label class="field">Radarr instance
+              <select name="anime_radarr_server_id">{radarr_select}</select>
+            </label>
+            <details class="advanced">
+              <summary>Advanced overrides</summary>
+              <p class="muted small">Force a specific quality profile / root folder instead of the
+                instance's anime defaults. Profile is the Seerr profile id.</p>
+              <div class="formrow">
+                <label class="field">Sonarr profile ID
+                  <input type="text" name="anime_sonarr_profile_id" value="{html.escape(sonarr_profile)}" placeholder="leave blank">
+                </label>
+                <label class="field">Sonarr root folder
+                  <input type="text" name="anime_sonarr_root_folder" value="{html.escape(sonarr_root)}" placeholder="e.g. /tv/anime">
+                </label>
+              </div>
+              <div class="formrow">
+                <label class="field">Radarr profile ID
+                  <input type="text" name="anime_radarr_profile_id" value="{html.escape(radarr_profile)}" placeholder="leave blank">
+                </label>
+                <label class="field">Radarr root folder
+                  <input type="text" name="anime_radarr_root_folder" value="{html.escape(radarr_root)}" placeholder="e.g. /movies/anime">
+                </label>
+              </div>
+            </details>
+            <button type="submit">Save anime routing</button>
+          </form>
+          <p class="muted small">Stored in the database (the <code>ANIME_SONARR_*</code> /
+            <code>ANIME_RADARR_*</code> env vars are only the first-run default). Note: whether a
+            series is added as <em>anime</em> (absolute numbering) is decided by Seerr's own anime
+            detection, not the bot — a title Seerr doesn't recognise as anime lands as a standard series.</p>
+        </div>
+        """
+
+    async def _anime_server_select(self, kind: str, current: str) -> str:
+        """<option>s for an anime instance picker, sourced from Seerr's configured services."""
+        try:
+            instances = await self.bot.seerr.list_service_instances(kind)
+        except SeerrError:
+            instances = []
+
+        selected_ids = set()
+        options = [
+            f'<option value=""{"" if current else " selected"}>— Disabled —</option>'
+        ]
+        for inst in instances:
+            if inst.id is None:
+                continue
+            value = str(inst.id)
+            selected = " selected" if value == current else ""
+            if selected:
+                selected_ids.add(value)
+            tags = []
+            if inst.is_default:
+                tags.append("default")
+            if inst.is_4k:
+                tags.append("4K")
+            suffix = f" · {', '.join(tags)}" if tags else ""
+            label = f"{inst.name or 'Unnamed'} (id {value}{suffix})"
+            options.append(f'<option value="{html.escape(value)}"{selected}>{html.escape(label)}</option>')
+
+        # Preserve a saved id that Seerr no longer lists (or couldn't be loaded) so
+        # saving the form doesn't silently wipe the existing routing.
+        if current and current not in selected_ids:
+            options.append(
+                f'<option value="{html.escape(current)}" selected>id {html.escape(current)} (not found)</option>'
+            )
+        return "".join(options)
 
     async def _arr_card(self) -> str:
         """Editable Radarr/Sonarr connection manager (our own credentials)."""
@@ -1061,6 +1188,24 @@ class WebDashboard:
         )
         raise web.HTTPFound("/settings?msg=" + _q("Approval settings saved."))
 
+    async def anime_action(self, request: web.Request) -> web.Response:
+        data = await request.post()
+
+        def _int_field(name: str) -> str:
+            value = str(data.get(name, "")).strip()
+            return value if value.isdigit() else ""
+
+        def _str_field(name: str) -> str:
+            return str(data.get(name, "")).strip()
+
+        await self.bot.store.set_setting("anime_sonarr_server_id", _int_field("anime_sonarr_server_id"))
+        await self.bot.store.set_setting("anime_sonarr_profile_id", _int_field("anime_sonarr_profile_id"))
+        await self.bot.store.set_setting("anime_sonarr_root_folder", _str_field("anime_sonarr_root_folder"))
+        await self.bot.store.set_setting("anime_radarr_server_id", _int_field("anime_radarr_server_id"))
+        await self.bot.store.set_setting("anime_radarr_profile_id", _int_field("anime_radarr_profile_id"))
+        await self.bot.store.set_setting("anime_radarr_root_folder", _str_field("anime_radarr_root_folder"))
+        raise web.HTTPFound("/settings?msg=" + _q("Anime routing saved."))
+
     # -- Radarr/Sonarr connections -----------------------------------------
 
     @staticmethod
@@ -1346,11 +1491,10 @@ _NAV = [
     ("/settings", "Settings", "settings"),
 ]
 
-_FAVICON = (
-    "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'>"
-    "<rect width='32' height='32' rx='7' fill='%235865f2'/>"
-    "<path d='M12 9l9 7-9 7z' fill='%23fff'/></svg>"
-)
+# The VaultRequestrr logo, served by the /icon.png route. A 256px copy bundled in
+# the package (the 1254px source lives in unraid/ for the Community Apps template).
+# Resolved relative to the package so it works regardless of CWD, and in Docker.
+_LOGO_PATH = Path(__file__).resolve().parent / "static" / "icon.png"
 
 
 def _icon(name: str, size: int = 18) -> str:
@@ -1379,7 +1523,7 @@ def _layout(title: str, body: str, *, nav: bool = True) -> str:
         <input type="checkbox" id="navtoggle" class="navtoggle" hidden>
         <label for="navtoggle" class="scrim"></label>
         <aside class="sidebar">
-          <a class="brand" href="/"><span class="logo"><svg viewBox="0 0 24 24" width="16" height="16" fill="#fff"><path d="M8 5v14l11-7z"/></svg></span>VaultRequestrr</a>
+          <a class="brand" href="/"><img class="logo" src="/icon.png" alt="" width="30" height="30">VaultRequestrr</a>
           <nav class="navlist">{items}</nav>
           <nav class="navlist foot"><a class="navitem" href="/logout">{_icon("logout")}<span>Sign out</span></a></nav>
         </aside>
@@ -1396,7 +1540,7 @@ def _layout(title: str, body: str, *, nav: bool = True) -> str:
     return f"""<!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="icon" href="{_FAVICON}">
+<link rel="icon" href="/icon.png">
 <title>{html.escape(title)} · VaultRequestrr</title>
 <style>{_CSS}</style>
 </head><body>{shell}</body></html>"""
@@ -1420,8 +1564,8 @@ a{color:inherit}
   display:flex;flex-direction:column;padding:16px 14px;position:sticky;top:0;height:100vh}
 .brand{display:flex;align-items:center;gap:11px;font-weight:700;font-size:16px;
   text-decoration:none;color:var(--fg);padding:6px 8px 18px}
-.brand .logo{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;
-  border-radius:8px;background:var(--accent);box-shadow:0 4px 12px rgba(88,101,242,.35)}
+.brand .logo{display:block;width:30px;height:30px;border-radius:8px;object-fit:cover;
+  box-shadow:0 4px 12px rgba(0,0,0,.35)}
 .navlist{display:flex;flex-direction:column;gap:2px}
 .navlist.foot{margin-top:auto;padding-top:10px;border-top:1px solid var(--line)}
 .navitem{display:flex;align-items:center;gap:11px;padding:10px 12px;border-radius:var(--radius-sm);
@@ -1495,8 +1639,30 @@ details.editbox{display:inline-block}
 details.editbox>summary{list-style:none}
 details.editbox>summary::-webkit-details-marker{display:none}
 .arrform{margin-top:10px;max-width:460px}
-.arrform .formrow{display:flex;gap:12px;flex-wrap:wrap}
-.arrform .formrow .field{flex:1;min-width:150px;margin-top:0}
+.formrow{display:flex;gap:12px;flex-wrap:wrap}
+.formrow .field{flex:1;min-width:150px;margin-top:0}
+details.advanced{margin:14px 0 6px;border:1px solid var(--line);border-radius:var(--radius-sm);
+  padding:0 14px;background:var(--card-2);max-width:480px}
+details.advanced>summary{padding:12px 0;cursor:pointer;font-size:13.5px;font-weight:600;
+  color:var(--muted);list-style:none}
+details.advanced[open]>summary{color:var(--fg)}
+details.advanced>summary::-webkit-details-marker{display:none}
+details.advanced>summary::before{content:"\\25B8";display:inline-block;margin-right:8px;
+  transition:transform .15s}
+details.advanced[open]>summary::before{transform:rotate(90deg)}
+details.advanced .formrow{padding-bottom:8px}
+
+/* Settings tabs (segmented pill nav; degrades to a flat stack without JS) */
+.subnav{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 22px}
+.subtab{display:inline-flex;align-items:center;gap:8px;padding:9px 15px;border-radius:999px;
+  color:var(--muted);text-decoration:none;font-size:13.5px;font-weight:600;
+  border:1px solid var(--line);background:transparent;cursor:pointer;transition:.15s}
+.subtab:hover{color:var(--fg);border-color:#3a3f4c;background:var(--card)}
+.settings.tabbed .subtab.active{background:var(--accent);border-color:var(--accent);color:#fff}
+.settings.tabbed .subtab.active .ic{color:#fff}
+.settings.tabbed .panel{display:none}
+.settings.tabbed .panel.active{display:block;animation:panelin .18s ease}
+@keyframes panelin{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:none}}
 
 /* Login */
 .login{max-width:360px;width:100%;text-align:center}
@@ -1541,6 +1707,39 @@ details.editbox>summary::-webkit-details-marker{display:none}
   main{padding:18px 16px 40px}.topbar{padding:13px 16px}
   .card{overflow-x:auto}
 }
+"""
+
+
+_SETTINGS_TABS_JS = """
+<script>
+(function(){
+  var root = document.getElementById('settings');
+  if(!root) return;
+  var tabs = Array.prototype.slice.call(root.querySelectorAll('.subtab'));
+  var panels = Array.prototype.slice.call(root.querySelectorAll('.panel'));
+  if(!tabs.length) return;
+  root.classList.add('tabbed');  // hides inactive panels; without JS all show
+  function activate(id, save){
+    var found = false;
+    tabs.forEach(function(t){
+      var on = t.dataset.tab === id;
+      t.classList.toggle('active', on);
+      if(on) found = true;
+    });
+    if(!found) return false;
+    panels.forEach(function(p){ p.classList.toggle('active', p.dataset.panel === id); });
+    if(save){ try{ localStorage.setItem('vrSettingsTab', id); }catch(e){} }
+    return true;
+  }
+  tabs.forEach(function(t){
+    t.addEventListener('click', function(e){ e.preventDefault(); activate(t.dataset.tab, true); });
+  });
+  // Restore the last-used tab across the save/redirect; #hash wins if present.
+  var hash = (location.hash || '').replace('#','');
+  var stored; try{ stored = localStorage.getItem('vrSettingsTab'); }catch(e){}
+  activate(hash) || activate(stored) || activate(tabs[0].dataset.tab);
+})();
+</script>
 """
 
 

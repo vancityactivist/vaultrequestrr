@@ -43,6 +43,15 @@ class Config:
     # optional channel to post pending requests to. Both overridable via the dashboard.
     admin_discord_ids: tuple[int, ...]
     approvals_channel_id: int | None
+    # Anime routing: the Seerr Sonarr/Radarr instance ids /anime requests target,
+    # plus optional profile/root-folder overrides. All overridable via the dashboard.
+    # A server id being set is what enables the /anime command for that media type.
+    anime_sonarr_server_id: int | None
+    anime_sonarr_profile_id: int | None
+    anime_sonarr_root_folder: str | None
+    anime_radarr_server_id: int | None
+    anime_radarr_profile_id: int | None
+    anime_radarr_root_folder: str | None
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -84,6 +93,12 @@ class Config:
             webhook_secret=os.getenv("WEBHOOK_SECRET", "").strip(),
             admin_discord_ids=_int_list(os.getenv("ADMIN_DISCORD_IDS")),
             approvals_channel_id=_optional_int(os.getenv("APPROVALS_CHANNEL_ID")),
+            anime_sonarr_server_id=_optional_int(os.getenv("ANIME_SONARR_SERVER_ID")),
+            anime_sonarr_profile_id=_optional_int(os.getenv("ANIME_SONARR_PROFILE_ID")),
+            anime_sonarr_root_folder=_optional_str(os.getenv("ANIME_SONARR_ROOT_FOLDER")),
+            anime_radarr_server_id=_optional_int(os.getenv("ANIME_RADARR_SERVER_ID")),
+            anime_radarr_profile_id=_optional_int(os.getenv("ANIME_RADARR_PROFILE_ID")),
+            anime_radarr_root_folder=_optional_str(os.getenv("ANIME_RADARR_ROOT_FOLDER")),
         )
 
 
@@ -109,3 +124,9 @@ def _optional_int(value: str | None) -> int | None:
         return int(value.strip())
     except ValueError as exc:
         raise ConfigError(f"Expected an integer but got {value!r}") from exc
+
+
+def _optional_str(value: str | None) -> str | None:
+    if value is None or not value.strip():
+        return None
+    return value.strip()

@@ -32,6 +32,15 @@ class FakeSeerr:
         return f"Title {tmdb_id}"
 
     async def list_service_instances(self, kind):
+        from vaultrequestrr.seerr import ServiceInstance
+
+        if kind == "sonarr":
+            return [
+                ServiceInstance(
+                    kind="sonarr", id=2, name="Anime Sonarr", hostname="anime",
+                    port=8989, use_ssl=False, is_default=False, is_4k=False, profile="HD",
+                )
+            ]
         return []
 
     async def list_issues(self, *, take=100):
@@ -78,6 +87,12 @@ class FakeBot:
             seerr_url="http://seerr:5055",
             seerr_api_key="envkey",
             webhook_secret="hook-secret",
+            anime_sonarr_server_id=None,
+            anime_sonarr_profile_id=None,
+            anime_sonarr_root_folder=None,
+            anime_radarr_server_id=None,
+            anime_radarr_profile_id=None,
+            anime_radarr_root_folder=None,
         )
         self.notifications = FakeNotifications()
         self.runtime = SimpleNamespace(
@@ -115,6 +130,17 @@ class FakeBot:
         if stored is not None:
             return int(stored) if stored.strip().isdigit() else None
         return getattr(self.config, "approvals_channel_id", None)
+
+    async def _anime_setting(self, key, env_default):
+        stored = await self.store.get_setting(key)
+        if stored is not None:
+            stored = stored.strip()
+            if not stored:
+                return None
+            if key.endswith(("_server_id", "_profile_id")):
+                return int(stored) if stored.isdigit() else None
+            return stored
+        return env_default
 
     async def plex_client_id(self):
         return "cid"
@@ -196,6 +222,50 @@ async def test_settings_toggle_updates_runtime(client):
 
 
 @pytest.mark.asyncio
+async def test_logo_served_and_referenced(client):
+    cli, _store, _dash = client
+    # Public (no login needed) so it loads on the sign-in page too.
+    resp = await cli.get("/icon.png")
+    assert resp.status == 200
+    assert resp.headers["Content-Type"] == "image/png"
+
+    await cli.post("/login", data={"password": "secret"})
+    body = await (await cli.get("/settings")).text()
+    assert 'href="/icon.png"' in body  # favicon
+    assert 'src="/icon.png"' in body   # sidebar brand
+
+
+@pytest.mark.asyncio
+async def test_anime_routing_saves_and_renders(client):
+    cli, store, _dash = client
+    await cli.post("/login", data={"password": "secret"})
+
+    await cli.post(
+        "/settings/anime",
+        data={
+            "anime_sonarr_server_id": "2",
+            "anime_sonarr_profile_id": "7",
+            "anime_sonarr_root_folder": "/tv/anime",
+            "anime_radarr_server_id": "",
+        },
+        allow_redirects=False,
+    )
+
+    assert await store.get_setting("anime_sonarr_server_id") == "2"
+    assert await store.get_setting("anime_sonarr_profile_id") == "7"
+    assert await store.get_setting("anime_sonarr_root_folder") == "/tv/anime"
+    assert await store.get_setting("anime_radarr_server_id") == ""
+
+    page = await (await cli.get("/settings")).text()
+    assert "Anime routing" in page
+    assert 'value="/tv/anime"' in page
+    # Server is chosen from a dropdown of Seerr's instances, not a free-text id.
+    assert "<select name=\"anime_sonarr_server_id\">" in page
+    assert "Anime Sonarr (id 2)" in page
+    assert "— Disabled —" in page
+
+
+@pytest.mark.asyncio
 async def test_issues_page_lists_and_resolves(client):
     cli, store, dash = client
     await store.save("42", 7, "neo", "neo@example.com")
@@ -244,9 +314,12 @@ async def test_settings_page_renders(client):
     page = await cli.get("/settings")
     body = await page.text()
     assert page.status == 200
-    assert "Seerr connection" in body and "Bot settings" in body
+    assert "Seerr connection" in body and "Bot behaviour" in body
     assert "Radarr / Sonarr connections" in body  # editable arr manager
     assert "http://seerr:5055" in body  # current URL pre-filled
+    # Grouped into tabbed sections rather than one flat stack of cards.
+    assert 'class="subnav"' in body
+    assert 'data-tab="approvals"' in body and 'data-panel="services"' in body
 
 
 @pytest.mark.asyncio
