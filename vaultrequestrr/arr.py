@@ -4,18 +4,20 @@ VaultRequestrr never stores arr credentials itself — it reads the Radarr/Sonar
 connection details out of Seerr's own settings at call time (see
 ``SeerrClient.get_arr_config``).
 
-Radarr/Sonarr can't "blocklist but keep the file" for an already-imported
-release (the file still satisfies the quality cutoff, so a search grabs
-nothing). The reliable way to force a replacement is therefore to delete the
-current file and trigger a fresh search:
+Re-searching a reported file (``research_media``) runs an *interactive* indexer
+search so the result is known synchronously, which lets the caller resolve the
+issue only when a release is actually grabbed:
 
-* Movie  → delete the movie file, then ``MoviesSearch``.
-* TV     → delete the reported episode's file, then ``EpisodeSearch`` for just
-           that episode (issues are filed per-episode).
+1. Make sure the item is **monitored** — Radarr/Sonarr won't grab for an
+   unmonitored movie/episode, so an automatic search would silently do nothing.
+2. Interactive search for candidate releases. If there are none, stop and leave
+   the existing file in place (don't delete something we can't replace).
+3. Delete the current file and grab the best candidate, forcing a replacement.
 """
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -28,6 +30,13 @@ logger = logging.getLogger(__name__)
 
 class ArrError(RuntimeError):
     """Raised when a Radarr/Sonarr request fails or the target can't be found."""
+
+
+@dataclass(frozen=True)
+class ResearchResult:
+    """Outcome of a delete-and-re-search: whether a release was actually grabbed."""
+    grabbed: bool
+    message: str
 
 
 class ArrClient:
@@ -84,13 +93,14 @@ class ArrClient:
     async def movie(self, movie_id: int) -> dict[str, Any]:
         return await self._request("GET", f"movie/{movie_id}") or {}
 
-    async def replace_movie(self, movie_id: int) -> None:
-        """Delete the movie's current file (if any) and search for a new one."""
-        movie = await self._request("GET", f"movie/{movie_id}")
-        file_id = (movie.get("movieFile") or {}).get("id")
-        if file_id:
-            await self._request("DELETE", f"moviefile/{file_id}")
-        await self._command("MoviesSearch", movieIds=[movie_id])
+    async def set_movie_monitored(self, movie_id: int, monitored: bool = True) -> None:
+        """Toggle a movie's monitored flag (so a search will actually grab)."""
+        await self._request(
+            "PUT", "movie/editor", json={"movieIds": [movie_id], "monitored": monitored}
+        )
+
+    async def delete_movie_file(self, file_id: int) -> None:
+        await self._request("DELETE", f"moviefile/{file_id}")
 
     # -- episodes (Sonarr) -------------------------------------------------
 
@@ -128,13 +138,15 @@ class ArrClient:
             raise ArrError(f"Sonarr has no S{season:02d}E{episode:02d} for that series.")
         return match
 
-    async def replace_episode(self, series_id: int, season: int, episode: int) -> None:
-        """Delete the reported episode's file (if any) and search for a new one."""
-        match = await self.find_episode(series_id, season, episode)
-        file_id = match.get("episodeFileId")
-        if file_id:
-            await self._request("DELETE", f"episodefile/{file_id}")
-        await self._command("EpisodeSearch", episodeIds=[match["id"]])
+    async def set_episode_monitored(self, episode_id: int, monitored: bool = True) -> None:
+        """Toggle an episode's monitored flag (so a search will actually grab)."""
+        await self._request(
+            "PUT", "episode/monitor",
+            json={"episodeIds": [episode_id], "monitored": monitored},
+        )
+
+    async def delete_episode_file(self, file_id: int) -> None:
+        await self._request("DELETE", f"episodefile/{file_id}")
 
     # -- manual search -----------------------------------------------------
 
@@ -153,11 +165,6 @@ class ArrClient:
         """Push a specific release to the download client."""
         await self._request("POST", "release", json={"guid": guid, "indexerId": indexer_id})
 
-    # -- helpers -----------------------------------------------------------
-
-    async def _command(self, name: str, **fields: Any) -> None:
-        await self._request("POST", "command", json={"name": name, **fields})
-
 
 async def research_media(
     instance: "ArrInstance",
@@ -167,11 +174,13 @@ async def research_media(
     season: int | None = None,
     episode: int | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
-) -> str:
-    """Delete the bad file and kick off a fresh search on a resolved instance.
+) -> ResearchResult:
+    """Monitor, interactive-search and grab a replacement on a resolved instance.
 
     ``external_id`` is the movieId/seriesId inside the arr (resolved upstream by
-    :class:`ArrManager`). Raises ArrError on failure.
+    :class:`ArrManager`). The existing file is only deleted once a release has
+    been found to grab, so a failed search never leaves the title empty.
+    Raises ArrError on failure; returns a :class:`ResearchResult` otherwise.
     """
     if external_id is None:
         raise ArrError("This title isn't managed by Radarr/Sonarr, so it can't be re-searched.")
@@ -183,13 +192,59 @@ async def research_media(
                 raise ArrError(
                     "This issue has no episode recorded — re-file it against a specific episode."
                 )
-            await client.replace_episode(external_id, season, episode)
-            return f"Deleted S{season:02d}E{episode:02d} and started a new search for it."
+            label = f"S{season:02d}E{episode:02d}"
+            ep = await client.find_episode(external_id, season, episode)
+            episode_id = ep["id"]
+            file_id = ep.get("episodeFileId")
+            await client.set_episode_monitored(episode_id, True)
+            best = _best_release(await client.releases(episode_id=episode_id))
+            if best is None:
+                return ResearchResult(
+                    False,
+                    f"No releases found for {label} — nothing was changed, so the issue stays open.",
+                )
+            if file_id:
+                await client.delete_episode_file(file_id)
+            await client.grab(best["guid"], best["indexer_id"])
+            return ResearchResult(
+                True, f"Grabbed “{best['title']}” from {best['indexer'] or 'the indexer'} for {label}."
+            )
 
-        await client.replace_movie(external_id)
-        return "Deleted the current file and started a new search."
+        movie = await client.movie(external_id)
+        file_id = (movie.get("movieFile") or {}).get("id")
+        await client.set_movie_monitored(external_id, True)
+        best = _best_release(await client.releases(movie_id=external_id))
+        if best is None:
+            return ResearchResult(
+                False, "No releases found — nothing was changed, so the issue stays open."
+            )
+        if file_id:
+            await client.delete_movie_file(file_id)
+        await client.grab(best["guid"], best["indexer_id"])
+        return ResearchResult(
+            True, f"Grabbed “{best['title']}” from {best['indexer'] or 'the indexer'}."
+        )
     finally:
         await client.aclose()
+
+
+def _best_release(raw_releases: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Pick the best grabbable release: prefer non-rejected, then by score/seeders."""
+    candidates = [
+        r for r in raw_releases if r.get("guid") and r.get("indexerId") is not None
+    ]
+    if not candidates:
+        return None
+
+    def score(r: dict[str, Any]) -> tuple[int, int, int, int]:
+        return (
+            0 if r.get("rejected") else 1,
+            r.get("customFormatScore") or 0,
+            r.get("qualityWeight") or 0,
+            r.get("seeders") or 0,
+        )
+
+    return _release_fields(max(candidates, key=score))
 
 
 def _host_of(base_url: str) -> str:
@@ -317,8 +372,8 @@ class ArrManager:
         *,
         season: int | None = None,
         episode: int | None = None,
-    ) -> str:
-        """Resolve then delete-and-research the title on our own credentials."""
+    ) -> ResearchResult:
+        """Resolve then monitor/search/grab a replacement on our own credentials."""
         instance, external_id = await self.resolve(media_type, tmdb_id)
         return await research_media(
             instance, media_type, external_id,

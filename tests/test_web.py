@@ -242,8 +242,8 @@ async def test_activity_shows_seerr_id_with_discord_hover(client):
     await cli.post("/login", data={"password": "secret"})
 
     body = await (await cli.get("/activity")).text()
-    assert "Seerr #7" in body                 # Seerr id shown, not the raw Discord id
-    assert "Discord ID: 999" in body          # revealed on hover
+    assert ">alice<" in body                   # Seerr account name shown, not the raw id
+    assert "Discord ID: 999 · Seerr #7" in body  # ids revealed on hover
     assert 'class="detailtoggle" data-id="1"' in body  # per-row details control
 
 
@@ -324,7 +324,7 @@ async def test_issues_page_lists_and_resolves(client):
     page = await cli.get("/issues")
     body = await page.text()
     assert "The Matrix" in body and "neo" in body and "Video" in body and "Resolve" in body
-    assert "Re-search" in body
+    assert "Re-grab" in body
 
     resp = await cli.post(
         "/issues/resolve", data={"issue_id": "5"}, allow_redirects=False
@@ -341,11 +341,13 @@ async def test_issue_research_action_invokes_arr(client, monkeypatch):
     await store.add_tracked_issue(5, "42", "movie", 603, "The Matrix", 1, "bad", 1)
     await cli.post("/login", data={"password": "secret"})
 
+    from vaultrequestrr.arr import ResearchResult
+
     calls = []
 
     async def fake_research(media_type, tmdb_id, *, season=None, episode=None):
         calls.append((media_type, tmdb_id, season, episode))
-        return "Deleted the current file and started a new search."
+        return ResearchResult(True, "Grabbed “Good Release”.")
 
     monkeypatch.setattr(_dash.bot.arr, "research", fake_research)
 
@@ -354,6 +356,28 @@ async def test_issue_research_action_invokes_arr(client, monkeypatch):
     )
     assert resp.status == 302 and resp.headers["Location"].startswith("/issues")
     assert calls == [("movie", 603, None, None)]
+    # A real grab resolves the issue.
+    assert _dash.bot.seerr.status_updates == [(5, True)]
+
+
+@pytest.mark.asyncio
+async def test_issue_research_no_grab_leaves_issue_open(client, monkeypatch):
+    cli, store, _dash = client
+    await store.add_tracked_issue(6, "42", "movie", 603, "The Matrix", 1, "bad", 1)
+    await cli.post("/login", data={"password": "secret"})
+
+    from vaultrequestrr.arr import ResearchResult
+
+    async def fake_research(media_type, tmdb_id, *, season=None, episode=None):
+        return ResearchResult(False, "No releases found — nothing was changed.")
+
+    monkeypatch.setattr(_dash.bot.arr, "research", fake_research)
+
+    resp = await cli.post(
+        "/issues/research", data={"issue_id": "6"}, allow_redirects=False
+    )
+    assert resp.status == 302
+    assert _dash.bot.seerr.status_updates == []  # not resolved without a grab
 
 
 @pytest.mark.asyncio
@@ -735,11 +759,13 @@ async def test_media_research_action(client, monkeypatch):
     cli, _store, dash = client
     await cli.post("/login", data={"password": "secret"})
 
+    from vaultrequestrr.arr import ResearchResult
+
     calls = []
 
     async def fake_research(media_type, tmdb_id, *, season=None, episode=None):
         calls.append((media_type, tmdb_id, season, episode))
-        return "Deleted the current file and started a new search."
+        return ResearchResult(True, "Grabbed “Ep”.")
 
     monkeypatch.setattr(dash.bot.arr, "research", fake_research)
     resp = await cli.post(

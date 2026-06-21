@@ -519,9 +519,9 @@ class WebDashboard:
                   <input type="hidden" name="issue_id" value="{it.issue_id}">
                   <button>{action_label}</button>
                 </form>
-                <form method="post" action="/issues/research" onsubmit="return confirm('Delete the current file and search for a replacement?')">
+                <form method="post" action="/issues/research" onsubmit="return confirm('Find a replacement release and grab it, replacing the current file? The issue is resolved only if a release is grabbed.')">
                   <input type="hidden" name="issue_id" value="{it.issue_id}">
-                  <button class="warn">Re-search</button>
+                  <button class="warn">Re-grab</button>
                 </form>
               </td>
             </tr>"""
@@ -975,7 +975,17 @@ class WebDashboard:
             )
         except (ArrError, SeerrError) as exc:
             raise web.HTTPFound("/issues?msg=" + _q(str(exc)))
-        raise web.HTTPFound("/issues?msg=" + _q(result))
+
+        # Only resolve the issue when a replacement was actually grabbed.
+        message = result.message
+        if result.grabbed:
+            try:
+                await self.bot.seerr.update_issue_status(issue_id, resolved=True)
+                await self.bot.store.mark_issue(issue_id, status=ISSUE_RESOLVED)
+                message += " Issue resolved."
+            except SeerrError as exc:
+                message += f" (couldn't resolve the issue in Seerr: {exc})"
+        raise web.HTTPFound("/issues?msg=" + _q(message))
 
     # -- media detail (direct Radarr/Sonarr view) --------------------------
 
@@ -1062,11 +1072,11 @@ class WebDashboard:
         <div class="card">
           <h2>Actions</h2>
           <div class="actions">
-            <form method="post" action="/media/research" onsubmit="return confirm('Delete the current file and search for a replacement?')">
+            <form method="post" action="/media/research" onsubmit="return confirm('Find a replacement release and grab it, replacing the current file?')">
               <input type="hidden" name="type" value="{html.escape(d["media_type"])}">
               <input type="hidden" name="tmdb" value="{d["tmdb_id"]}">
               {season_episode}
-              <button class="warn">Delete &amp; auto-search</button>
+              <button class="warn">Find &amp; re-grab</button>
             </form>
             <a class="btn" href="/media/search?{self._media_query(d["media_type"], d["tmdb_id"], d["season"], d["episode"])}">Manual search</a>
             <a class="btn ghost" href="/issues">Back to issues</a>
@@ -1090,7 +1100,7 @@ class WebDashboard:
             )
         except (ArrError, SeerrError) as exc:
             raise web.HTTPFound(back + "&msg=" + _q(str(exc)))
-        raise web.HTTPFound(back + "&msg=" + _q(result))
+        raise web.HTTPFound(back + "&msg=" + _q(result.message))
 
     async def media_search_page(self, request: web.Request) -> web.Response:
         media_type = request.query.get("type", "")
@@ -1694,7 +1704,8 @@ details.advanced>summary::before{content:"\\25B8";display:inline-block;margin-ri
 details.advanced[open]>summary::before{transform:rotate(90deg)}
 details.advanced .formrow{padding-bottom:8px}
 
-/* Activity details flyout */
+/* Activity requester + details flyout */
+.who{cursor:help;border-bottom:1px dotted var(--muted)}
 button.detailtoggle{background:transparent;border:1px solid var(--line);color:var(--muted);
   padding:5px 12px;font-size:12.5px;font-weight:600}
 button.detailtoggle:hover{border-color:var(--accent);color:var(--fg);filter:none}
@@ -1892,14 +1903,13 @@ def _status_badge(tracked) -> str:  # type: ignore[no-untyped-def]
 
 
 def _requester_cell(discord_id: str, link) -> str:  # type: ignore[no-untyped-def]
-    """Show the Seerr user id, with the Discord id on hover (falls back to Discord)."""
+    """Show the Seerr account name, with the Discord id on hover (falls back to Discord)."""
     if link is not None:
-        who = link.plex_username or link.email
-        label = f"Seerr #{link.seerr_user_id}"
-        tip = f"Discord ID: {discord_id}" + (f" · {who}" if who else "")
-        return f'<code title="{html.escape(tip)}">{html.escape(label)}</code>'
+        name = link.plex_username or link.email or f"Seerr #{link.seerr_user_id}"
+        tip = f"Discord ID: {discord_id} · Seerr #{link.seerr_user_id}"
+        return f'<span class="who" title="{html.escape(tip)}">{html.escape(name)}</span>'
     return (
-        f'<code title="Discord ID: {html.escape(discord_id)} · no linked Seerr account">'
+        f'<code class="who" title="Discord ID: {html.escape(discord_id)} · no linked Seerr account">'
         f'{html.escape(discord_id)}</code>'
     )
 

@@ -11,93 +11,6 @@ def make_client(handler) -> ArrClient:
     return ArrClient("http://radarr:7878", "key", transport=httpx.MockTransport(handler))
 
 
-@pytest.mark.asyncio
-async def test_replace_movie_deletes_file_then_searches():
-    calls = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        calls.append((request.method, request.url.path))
-        if request.url.path == "/api/v3/movie/110":
-            return httpx.Response(200, json={"id": 110, "movieFile": {"id": 555}})
-        if request.url.path == "/api/v3/command":
-            assert json.loads(request.content) == {"name": "MoviesSearch", "movieIds": [110]}
-            return httpx.Response(201, json={})
-        return httpx.Response(200, json={})
-
-    client = make_client(handler)
-    try:
-        await client.replace_movie(110)
-    finally:
-        await client.aclose()
-
-    assert ("GET", "/api/v3/movie/110") in calls
-    assert ("DELETE", "/api/v3/moviefile/555") in calls
-    assert ("POST", "/api/v3/command") in calls
-
-
-@pytest.mark.asyncio
-async def test_replace_movie_without_file_just_searches():
-    calls = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        calls.append((request.method, request.url.path))
-        if request.url.path == "/api/v3/movie/110":
-            return httpx.Response(200, json={"id": 110, "hasFile": False})
-        return httpx.Response(201, json={})
-
-    client = make_client(handler)
-    try:
-        await client.replace_movie(110)
-    finally:
-        await client.aclose()
-
-    assert not any(m == "DELETE" for m, _ in calls)  # nothing to delete
-    assert ("POST", "/api/v3/command") in calls
-
-
-@pytest.mark.asyncio
-async def test_replace_episode_targets_single_episode():
-    calls = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        calls.append((request.method, request.url.path))
-        if request.url.path == "/api/v3/episode":
-            assert request.url.params["seriesId"] == "302"
-            return httpx.Response(200, json=[
-                {"id": 899, "seasonNumber": 1, "episodeNumber": 1, "episodeFileId": 776},
-                {"id": 900, "seasonNumber": 1, "episodeNumber": 2, "episodeFileId": 777},
-                {"id": 901, "seasonNumber": 2, "episodeNumber": 2, "episodeFileId": 778},
-            ])
-        if request.url.path == "/api/v3/command":
-            assert json.loads(request.content) == {"name": "EpisodeSearch", "episodeIds": [900]}
-            return httpx.Response(201, json={})
-        return httpx.Response(200, json={})
-
-    client = make_client(handler)
-    try:
-        await client.replace_episode(302, 1, 2)
-    finally:
-        await client.aclose()
-
-    assert ("DELETE", "/api/v3/episodefile/777") in calls  # only the reported episode
-    assert ("POST", "/api/v3/command") in calls
-
-
-@pytest.mark.asyncio
-async def test_replace_episode_missing_episode_errors():
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json=[
-            {"id": 899, "seasonNumber": 1, "episodeNumber": 1, "episodeFileId": 776}
-        ])
-
-    client = make_client(handler)
-    try:
-        with pytest.raises(ArrError):
-            await client.replace_episode(302, 1, 99)
-    finally:
-        await client.aclose()
-
-
 def make_instance(kind="radarr") -> ArrInstance:
     return ArrInstance(
         id="i1", kind=kind, label="Radarr", base_url="http://arr:7878",
@@ -106,16 +19,63 @@ def make_instance(kind="radarr") -> ArrInstance:
 
 
 @pytest.mark.asyncio
-async def test_research_media_movie():
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/api/v3/movie/110":
-            return httpx.Response(200, json={"id": 110, "movieFile": {"id": 5}})
-        return httpx.Response(201, json={})
+async def test_research_media_movie_monitors_then_grabs_best_release():
+    calls = []
 
-    msg = await research_media(
+    def handler(request: httpx.Request) -> httpx.Response:
+        p = request.url.path
+        calls.append((request.method, p))
+        if request.method == "GET" and p == "/api/v3/movie/110":
+            return httpx.Response(200, json={"id": 110, "movieFile": {"id": 5}})
+        if request.method == "PUT" and p == "/api/v3/movie/editor":
+            assert json.loads(request.content) == {"movieIds": [110], "monitored": True}
+            return httpx.Response(202, json={})
+        if request.method == "GET" and p == "/api/v3/release":
+            return httpx.Response(200, json=[
+                {"guid": "a", "indexerId": 1, "title": "Bad", "rejected": True,
+                 "qualityWeight": 30, "seeders": 5, "indexer": "X"},
+                {"guid": "b", "indexerId": 2, "title": "Good", "rejected": False,
+                 "qualityWeight": 20, "seeders": 50, "indexer": "NZB"},
+            ])
+        if request.method == "POST" and p == "/api/v3/release":
+            assert json.loads(request.content) == {"guid": "b", "indexerId": 2}
+            return httpx.Response(201, json={})
+        return httpx.Response(200, json={})
+
+    res = await research_media(
         make_instance(), "movie", 110, transport=httpx.MockTransport(handler)
     )
-    assert "new search" in msg.lower()
+
+    assert res.grabbed is True
+    assert "Good" in res.message
+    # Monitored set, file deleted, and the non-rejected release grabbed.
+    assert ("PUT", "/api/v3/movie/editor") in calls
+    assert ("DELETE", "/api/v3/moviefile/5") in calls
+    assert ("POST", "/api/v3/release") in calls
+
+
+@pytest.mark.asyncio
+async def test_research_media_movie_no_releases_keeps_file_and_does_not_grab():
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        p = request.url.path
+        calls.append((request.method, p))
+        if p == "/api/v3/movie/110":
+            return httpx.Response(200, json={"id": 110, "movieFile": {"id": 5}})
+        if p == "/api/v3/movie/editor":
+            return httpx.Response(202, json={})
+        if p == "/api/v3/release":
+            return httpx.Response(200, json=[])  # nothing found
+        return httpx.Response(200, json={})
+
+    res = await research_media(
+        make_instance(), "movie", 110, transport=httpx.MockTransport(handler)
+    )
+
+    assert res.grabbed is False
+    assert "No releases" in res.message
+    assert not any(m == "DELETE" for m, _ in calls)  # never delete what we can't replace
 
 
 @pytest.mark.asyncio
@@ -125,19 +85,36 @@ async def test_research_media_tv_requires_episode():
 
 
 @pytest.mark.asyncio
-async def test_research_media_tv_with_episode():
+async def test_research_media_tv_monitors_and_grabs_episode():
+    calls = []
+
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/api/v3/episode":
+        p = request.url.path
+        calls.append((request.method, p))
+        if request.method == "GET" and p == "/api/v3/episode":
             return httpx.Response(200, json=[
                 {"id": 900, "seasonNumber": 1, "episodeNumber": 2, "episodeFileId": 7}
             ])
-        return httpx.Response(201, json={})
+        if p == "/api/v3/episode/monitor":
+            assert json.loads(request.content) == {"episodeIds": [900], "monitored": True}
+            return httpx.Response(202, json={})
+        if request.method == "GET" and p == "/api/v3/release":
+            return httpx.Response(200, json=[
+                {"guid": "x", "indexerId": 3, "title": "Ep", "rejected": False, "indexer": "NZB"}
+            ])
+        if request.method == "POST" and p == "/api/v3/release":
+            return httpx.Response(201, json={})
+        return httpx.Response(200, json={})
 
-    msg = await research_media(
+    res = await research_media(
         make_instance("sonarr"), "tv", 302, season=1, episode=2,
         transport=httpx.MockTransport(handler),
     )
-    assert "S01E02" in msg
+
+    assert res.grabbed is True
+    assert "S01E02" in res.message
+    assert ("PUT", "/api/v3/episode/monitor") in calls
+    assert ("DELETE", "/api/v3/episodefile/7") in calls
 
 
 @pytest.mark.asyncio
