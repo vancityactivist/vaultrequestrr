@@ -340,11 +340,13 @@ class ArrManager:
         quality: str | None = None
         size: int | None = None
         languages: list[str] = []
+        path: str | None = None
         try:
             if media_type == "tv":
                 series = await client.series(external_id)
                 title = series.get("title")
                 monitored = bool(series.get("monitored"))
+                path = series.get("path")
                 has_file = False
                 if season is not None and episode is not None:
                     ep = await client.find_episode(external_id, season, episode)
@@ -356,6 +358,9 @@ class ArrManager:
                             await client.episode_file(file_id)
                         )
                         has_file = True
+                # Without a specific episode, fall back to the whole-series size.
+                if size is None:
+                    size = (series.get("statistics") or {}).get("sizeOnDisk")
                 queue = _queue_items(
                     await client.queue_details(series_id=external_id), episode_id=episode_id
                 )
@@ -364,6 +369,7 @@ class ArrManager:
                 title = movie.get("title")
                 monitored = bool(movie.get("monitored"))
                 has_file = bool(movie.get("hasFile"))
+                path = movie.get("path")
                 movie_file = movie.get("movieFile") or {}
                 if movie_file:
                     quality, size, languages = _file_fields(movie_file)
@@ -387,6 +393,7 @@ class ArrManager:
             "quality": quality,
             "size": size,
             "languages": languages,
+            "path": path,
             "queue": queue,
         }
 

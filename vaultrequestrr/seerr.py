@@ -113,6 +113,19 @@ class TvDetails:
 
 
 @dataclass(frozen=True)
+class MediaSummary:
+    """Lightweight TMDB-backed detail view for a movie/TV title (for the UI)."""
+    media_type: MediaType
+    tmdb_id: int
+    title: str | None
+    release_date: str | None
+    runtime: int | None  # minutes
+    genres: list[str]
+    overview: str | None
+    poster_url: str | None
+
+
+@dataclass(frozen=True)
 class QuotaStatus:
     limit: int  # 0 means unlimited
     used: int
@@ -340,6 +353,31 @@ class SeerrClient:
             return None
         poster = data.get("posterPath")
         return f"https://image.tmdb.org/t/p/w500{poster}" if poster else None
+
+    async def get_media_summary(self, media_type: MediaType, tmdb_id: int) -> MediaSummary:
+        """Title, release date, runtime, genres, overview and poster for a title."""
+        endpoint = "tv" if media_type == "tv" else "movie"
+        data = await self._get(f"{endpoint}/{tmdb_id}")
+        if media_type == "tv":
+            release = data.get("firstAirDate")
+            runtimes = data.get("episodeRunTime") or []
+            runtime = runtimes[0] if runtimes else None
+            title = data.get("name") or data.get("title")
+        else:
+            release = data.get("releaseDate")
+            runtime = data.get("runtime")
+            title = data.get("title") or data.get("name")
+        poster = data.get("posterPath")
+        return MediaSummary(
+            media_type=media_type,
+            tmdb_id=tmdb_id,
+            title=title,
+            release_date=release or None,
+            runtime=runtime or None,
+            genres=[g.get("name") for g in (data.get("genres") or []) if g.get("name")],
+            overview=data.get("overview") or None,
+            poster_url=f"https://image.tmdb.org/t/p/w300{poster}" if poster else None,
+        )
 
     async def get_quota(self, user_id: int) -> UserQuota:
         data = await self._get(f"user/{user_id}/quota")

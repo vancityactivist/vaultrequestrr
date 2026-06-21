@@ -60,6 +60,7 @@ class WebDashboard:
                 web.post("/links/limit", self.limit_action),
                 web.get("/invites", self.invites_page),
                 web.get("/activity", self.activity_page),
+                web.get("/activity/detail", self.activity_detail),
                 web.get("/approvals", self.approvals_page),
                 web.post("/approvals/approve", self.approval_approve_action),
                 web.post("/approvals/decline", self.approval_decline_action),
@@ -285,28 +286,69 @@ class WebDashboard:
 
     async def activity_page(self, request: web.Request) -> web.Response:
         items = await self.bot.store.recent_tracked(100)
+        # One query for all links so each row can show the Seerr id (Discord on hover).
+        link_by_discord = {link.discord_id: link for link in await self.bot.store.list_links()}
         rows = ""
         for it in items:
             rows += f"""
             <tr>
               <td>{html.escape((it.title or '—'))}</td>
               <td>{html.escape(it.media_type)}</td>
-              <td><code>{html.escape(it.discord_id)}</code></td>
+              <td>{_requester_cell(it.discord_id, link_by_discord.get(it.discord_id))}</td>
               <td>{_status_badge(it)}</td>
               <td>{html.escape((it.created_at or '')[:19])}</td>
+              <td class="actions"><button class="detailtoggle" data-id="{it.request_id}" aria-expanded="false">Details</button></td>
+            </tr>
+            <tr class="detailrow" id="detail-{it.request_id}" hidden>
+              <td colspan="6"><div class="detailbody muted small">Loading…</div></td>
             </tr>"""
         if not items:
-            rows = _empty_row(5, "No activity yet.", "activity")
+            rows = _empty_row(6, "No activity yet.", "activity")
         body = f"""
         <div class="card">
           <h2>Recent requests ({len(items)})</h2>
           <table>
-            <thead><tr><th>Title</th><th>Type</th><th>Requester</th><th>Status</th><th>When</th></tr></thead>
+            <thead><tr><th>Title</th><th>Type</th><th>Requester</th><th>Status</th><th>When</th><th></th></tr></thead>
             <tbody>{rows}</tbody>
           </table>
         </div>
+        {_ACTIVITY_JS}
         """
         return _html(_layout("Activity", body))
+
+    async def activity_detail(self, request: web.Request) -> web.Response:
+        """HTML fragment with richer media details, lazy-loaded by the Activity page."""
+        try:
+            request_id = int(request.query.get("id", ""))
+        except ValueError:
+            return web.Response(text="Bad request id.", content_type="text/html")
+        tracked = await self.bot.store.get_tracked(request_id)
+        if tracked is None or tracked.tmdb_id is None or not tracked.media_type:
+            return web.Response(
+                text='<p class="muted small">No details available.</p>',
+                content_type="text/html",
+            )
+
+        summary = None
+        try:
+            summary = await self.bot.seerr.get_media_summary(
+                tracked.media_type, tracked.tmdb_id
+            )
+        except SeerrError:
+            pass
+
+        # Size / location come straight from the arr; best-effort (needs an arr
+        # connection and the title to be resolvable there).
+        detail = None
+        try:
+            detail = await self.bot.arr.media_detail(tracked.media_type, tracked.tmdb_id)
+        except (ArrError, SeerrError):
+            pass
+
+        return web.Response(
+            text=_render_activity_detail(tracked, summary, detail),
+            content_type="text/html",
+        )
 
     async def invites_page(self, request: web.Request) -> web.Response:
         items = await self.bot.store.recent_invites(200)
@@ -1652,6 +1694,23 @@ details.advanced>summary::before{content:"\\25B8";display:inline-block;margin-ri
 details.advanced[open]>summary::before{transform:rotate(90deg)}
 details.advanced .formrow{padding-bottom:8px}
 
+/* Activity details flyout */
+button.detailtoggle{background:transparent;border:1px solid var(--line);color:var(--muted);
+  padding:5px 12px;font-size:12.5px;font-weight:600}
+button.detailtoggle:hover{border-color:var(--accent);color:var(--fg);filter:none}
+button.detailtoggle[aria-expanded="true"]{border-color:var(--accent);color:var(--fg);
+  background:var(--accent-soft)}
+.detailrow td{background:var(--card-2);padding:16px 18px}
+.detailrow:hover td{background:var(--card-2)}
+.detailflex{display:flex;gap:18px;align-items:flex-start}
+.detailposter{width:96px;height:auto;border-radius:8px;flex:0 0 auto;box-shadow:var(--shadow)}
+.detailinfo{flex:1;min-width:0}
+.detailmeta{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+  gap:12px 20px;margin:0}
+.detailmeta dt{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px;margin:0}
+.detailmeta dd{margin:3px 0 0;font-size:13.5px;word-break:break-word}
+.detailinfo .overview{margin:14px 0 0;line-height:1.55}
+
 /* Settings tabs (segmented pill nav; degrades to a flat stack without JS) */
 .subnav{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 22px}
 .subtab{display:inline-flex;align-items:center;gap:8px;padding:9px 15px;border-radius:999px;
@@ -1776,6 +1835,32 @@ _PLEX_LOGIN_JS = """
 """
 
 
+_ACTIVITY_JS = """
+<script>
+(function(){
+  document.querySelectorAll('.detailtoggle').forEach(function(btn){
+    btn.addEventListener('click', async function(){
+      var row = document.getElementById('detail-' + btn.dataset.id);
+      if(!row) return;
+      if(!row.hidden){ row.hidden = true; btn.setAttribute('aria-expanded','false'); return; }
+      row.hidden = false; btn.setAttribute('aria-expanded','true');
+      if(btn.dataset.loaded) return;
+      btn.dataset.loaded = '1';
+      var box = row.querySelector('.detailbody');
+      try {
+        var r = await fetch('/activity/detail?id=' + encodeURIComponent(btn.dataset.id));
+        box.innerHTML = await r.text();
+        box.classList.remove('muted','small');
+      } catch(e) {
+        box.textContent = 'Could not load details.'; btn.dataset.loaded = '';
+      }
+    });
+  });
+})();
+</script>
+"""
+
+
 def _short_name(name: str) -> str:
     # "discord.gateway" -> "discord.gateway"; trim very long names.
     return name if len(name) <= 28 else name[:27] + "…"
@@ -1804,6 +1889,68 @@ def _status_badge(tracked) -> str:  # type: ignore[no-untyped-def]
     if tracked.notified_declined or tracked.request_status == REQUEST_DECLINED:
         return '<span class="badge bad">Declined</span>'
     return '<span class="badge pend">Pending</span>'
+
+
+def _requester_cell(discord_id: str, link) -> str:  # type: ignore[no-untyped-def]
+    """Show the Seerr user id, with the Discord id on hover (falls back to Discord)."""
+    if link is not None:
+        who = link.plex_username or link.email
+        label = f"Seerr #{link.seerr_user_id}"
+        tip = f"Discord ID: {discord_id}" + (f" · {who}" if who else "")
+        return f'<code title="{html.escape(tip)}">{html.escape(label)}</code>'
+    return (
+        f'<code title="Discord ID: {html.escape(discord_id)} · no linked Seerr account">'
+        f'{html.escape(discord_id)}</code>'
+    )
+
+
+def _render_activity_detail(tracked, summary, detail) -> str:  # type: ignore[no-untyped-def]
+    """Build the lazy-loaded details fragment for one Activity row."""
+    poster = ""
+    if summary is not None and summary.poster_url:
+        poster = f'<img class="detailposter" src="{html.escape(summary.poster_url)}" alt="" loading="lazy">'
+
+    rows: list[str] = []
+
+    def add(label: str, value: str | None) -> None:
+        if value:
+            rows.append(f"<div><dt>{label}</dt><dd>{value}</dd></div>")
+
+    if summary is not None:
+        add("Released", html.escape(summary.release_date or ""))
+        if summary.runtime:
+            add("Runtime", f"{summary.runtime} min")
+        if summary.genres:
+            add("Genres", html.escape(", ".join(summary.genres)))
+    if tracked.media_type == "tv" and tracked.seasons:
+        seasons = "All seasons" if tracked.seasons == "all" else f"Seasons {html.escape(tracked.seasons)}"
+        add("Requested", seasons)
+    if detail is not None:
+        instance = detail.get("instance")
+        location = html.escape(instance.label) if instance is not None else ""
+        if detail.get("path"):
+            location += f' · <code>{html.escape(str(detail["path"]))}</code>'
+        add("Location", location or None)
+        if detail.get("size"):
+            add("Size on disk", _fmt_size(detail["size"]))
+        if detail.get("quality"):
+            add("Quality", html.escape(str(detail["quality"])))
+    kind = "tv" if tracked.media_type == "tv" else "movie"
+    add(
+        "TMDB",
+        f'<a href="https://www.themoviedb.org/{kind}/{tracked.tmdb_id}" '
+        f'target="_blank" rel="noopener">#{tracked.tmdb_id}</a>',
+    )
+
+    overview = ""
+    if summary is not None and summary.overview:
+        text = summary.overview if len(summary.overview) <= 320 else summary.overview[:319].rstrip() + "…"
+        overview = f'<p class="muted small overview">{html.escape(text)}</p>'
+
+    meta = f'<dl class="detailmeta">{"".join(rows)}</dl>' if rows else ""
+    if not (poster or meta or overview):
+        return '<p class="muted small">No extra details available.</p>'
+    return f'<div class="detailflex">{poster}<div class="detailinfo">{meta}{overview}</div></div>'
 
 
 def _flash(request: web.Request) -> str:

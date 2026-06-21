@@ -31,6 +31,16 @@ class FakeSeerr:
     async def get_title(self, media_type, tmdb_id):
         return f"Title {tmdb_id}"
 
+    async def get_media_summary(self, media_type, tmdb_id):
+        from vaultrequestrr.seerr import MediaSummary
+
+        return MediaSummary(
+            media_type=media_type, tmdb_id=tmdb_id, title="The Matrix",
+            release_date="1999-03-30", runtime=136, genres=["Action", "Sci-Fi"],
+            overview="A hacker discovers reality is a simulation.",
+            poster_url="https://image.tmdb.org/t/p/w300/x.jpg",
+        )
+
     async def list_service_instances(self, kind):
         from vaultrequestrr.seerr import ServiceInstance
 
@@ -219,6 +229,45 @@ async def test_settings_toggle_updates_runtime(client):
     assert rt.require_linking is False  # unchecked => off
     assert rt.notify_on_declined is False
     assert rt.log_level == "DEBUG"
+
+
+@pytest.mark.asyncio
+async def test_activity_shows_seerr_id_with_discord_hover(client):
+    cli, store, _dash = client
+    await store.save("999", 7, "alice", "alice@example.com")
+    await store.add_tracked_request(
+        request_id=1, discord_id="999", media_type="movie", tmdb_id=603,
+        title="The Matrix", seasons=None,
+    )
+    await cli.post("/login", data={"password": "secret"})
+
+    body = await (await cli.get("/activity")).text()
+    assert "Seerr #7" in body                 # Seerr id shown, not the raw Discord id
+    assert "Discord ID: 999" in body          # revealed on hover
+    assert 'class="detailtoggle" data-id="1"' in body  # per-row details control
+
+
+@pytest.mark.asyncio
+async def test_activity_detail_fragment(client):
+    cli, store, _dash = client
+    await store.add_tracked_request(
+        request_id=2, discord_id="999", media_type="movie", tmdb_id=603,
+        title="The Matrix", seasons=None,
+    )
+    await cli.post("/login", data={"password": "secret"})
+
+    resp = await cli.get("/activity/detail?id=2")
+    assert resp.status == 200
+    frag = await resp.text()
+    assert "1999-03-30" in frag               # release date from Seerr
+    assert "Action, Sci-Fi" in frag           # genres
+    assert "simulation" in frag               # overview
+    assert "themoviedb.org/movie/603" in frag # TMDB link
+
+    # Unknown request id degrades gracefully rather than erroring.
+    missing = await cli.get("/activity/detail?id=999999")
+    assert missing.status == 200
+    assert "No details available" in await missing.text()
 
 
 @pytest.mark.asyncio
