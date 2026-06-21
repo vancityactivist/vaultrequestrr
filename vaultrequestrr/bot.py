@@ -71,6 +71,27 @@ class VaultRequestrr(commands.Bot):
             return int(stored) if stored.strip().isdigit() else None
         return self.config.approvals_channel_id
 
+    async def issue_notify_ids(self) -> set[int]:
+        """Discord ids that are DM'd about new issues and may act on them.
+
+        Blank/unset falls back to the approval admins, so issues notify the same
+        people as requests until an issue-specific list is configured.
+        """
+        stored = await self.store.get_setting("issue_notify_discord_ids")
+        if stored and stored.strip():
+            return {int(p) for p in stored.split(",") if p.strip().isdigit()}
+        return await self.admin_ids()
+
+    async def is_issue_handler(self, discord_id: int | str) -> bool:
+        return int(discord_id) in await self.issue_notify_ids()
+
+    async def issues_channel_id(self) -> int | None:
+        """Channel to post issue cards to; blank/unset falls back to the approvals channel."""
+        stored = await self.store.get_setting("issues_channel_id")
+        if stored and stored.strip().isdigit():
+            return int(stored)
+        return await self.approvals_channel_id()
+
     async def _anime_setting(self, key: str, env_default: int | str | None) -> int | str | None:
         """Resolve one anime-routing value: dashboard-set wins, env is the default.
 

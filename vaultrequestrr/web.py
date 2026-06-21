@@ -78,6 +78,7 @@ class WebDashboard:
                 web.post("/settings/connection", self.connection_action),
                 web.post("/settings/webhook", self.webhook_action),
                 web.post("/settings/admins", self.admins_action),
+                web.post("/settings/issues", self.issues_action),
                 web.post("/settings/anime", self.anime_action),
                 web.post("/settings/arr/add", self.arr_add_action),
                 web.post("/settings/arr/update", self.arr_update_action),
@@ -600,6 +601,7 @@ class WebDashboard:
         webhook_secret = await self._effective_webhook_secret()
         webhook_card = self._webhook_card(request, webhook_secret)
         admins_card = await self._admins_card()
+        issues_card = await self._issues_card()
         anime_card = await self._anime_card()
         arr_card = await self._arr_card()
         plex_card = await self._plex_card()
@@ -641,7 +643,7 @@ class WebDashboard:
         # scroll. Falls back to a flat stack when JS is off (see _SETTINGS_TABS_JS).
         tabs = [
             ("general", "General", "settings", seerr_card + bot_card),
-            ("approvals", "Approvals", "approvals", admins_card),
+            ("approvals", "Approvals & Issues", "approvals", admins_card + issues_card),
             ("notifications", "Notifications", "mail", webhook_card),
             ("services", "Services", "server", arr_card + anime_card),
             ("plex", "Plex", "link", plex_card),
@@ -708,7 +710,7 @@ class WebDashboard:
         channel_value = "" if channel is None else str(channel)
         return f"""
         <div class="card">
-          <h2>Approvals &amp; admins</h2>
+          <h2>Request approvals</h2>
           <form method="post" action="/settings/admins">
             <label class="field">Approver Discord IDs
               <input type="text" name="admin_discord_ids" value="{html.escape(ids_value)}" placeholder="e.g. 1234567890, 9876543210">
@@ -723,6 +725,30 @@ class WebDashboard:
             channel id is set, pending requests are also posted there. Stored in the
             database (the <code>ADMIN_DISCORD_IDS</code> / <code>APPROVALS_CHANNEL_ID</code>
             env vars are only the first-run default).</p>
+        </div>
+        """
+
+    async def _issues_card(self) -> str:
+        """Manage who is notified about reported issues + the optional issue channel."""
+        # Show the raw configured values (blank = "use the approval settings").
+        ids_value = await self.bot.store.get_setting("issue_notify_discord_ids") or ""
+        channel_value = await self.bot.store.get_setting("issues_channel_id") or ""
+        return f"""
+        <div class="card">
+          <h2>Issue notifications</h2>
+          <form method="post" action="/settings/issues">
+            <label class="field">Issue handler Discord IDs
+              <input type="text" name="issue_notify_discord_ids" value="{html.escape(ids_value)}" placeholder="leave blank to use the approver list above">
+            </label>
+            <label class="field">Issue channel ID (optional)
+              <input type="text" name="issues_channel_id" value="{html.escape(channel_value)}" placeholder="leave blank to use the approvals channel">
+            </label>
+            <button type="submit">Save</button>
+          </form>
+          <p class="muted small">When a user files an issue, these people are DM'd a card with
+            <strong>Re-grab</strong> / <strong>Resolve</strong> buttons (and may act on them); if a
+            channel id is set, the card is posted there too. Leave either field blank to reuse the
+            approver list / approvals channel above. Stored in the database.</p>
         </div>
         """
 
@@ -1239,6 +1265,18 @@ class WebDashboard:
             "approvals_channel_id", channel if channel.isdigit() else ""
         )
         raise web.HTTPFound("/settings?msg=" + _q("Approval settings saved."))
+
+    async def issues_action(self, request: web.Request) -> web.Response:
+        data = await request.post()
+        raw = str(data.get("issue_notify_discord_ids", ""))
+        ids = [p.strip() for p in raw.replace(" ", ",").split(",") if p.strip().isdigit()]
+        await self.bot.store.set_setting("issue_notify_discord_ids", ",".join(ids))
+
+        channel = str(data.get("issues_channel_id", "")).strip()
+        await self.bot.store.set_setting(
+            "issues_channel_id", channel if channel.isdigit() else ""
+        )
+        raise web.HTTPFound("/settings?msg=" + _q("Issue notification settings saved."))
 
     async def anime_action(self, request: web.Request) -> web.Response:
         data = await request.post()

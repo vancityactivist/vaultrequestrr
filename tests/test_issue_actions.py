@@ -91,6 +91,15 @@ class FakeBot:
     async def approvals_channel_id(self):
         return self._channel_id
 
+    async def issue_notify_ids(self):
+        return set(self._admins)
+
+    async def is_issue_handler(self, discord_id):
+        return int(discord_id) in self._admins
+
+    async def issues_channel_id(self):
+        return self._channel_id
+
     def get_channel(self, cid):
         return FakeChannel(self.channel_sink)
 

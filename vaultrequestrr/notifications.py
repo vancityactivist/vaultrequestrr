@@ -92,7 +92,12 @@ class NotificationService:
             requester_label=requester_label,
             seasons=seasons,
         )
-        await self._broadcast_to_admins(embeds, lambda: build_approval_view(request_id))
+        await self._broadcast(
+            embeds,
+            lambda: build_approval_view(request_id),
+            recipient_ids=await self.bot.admin_ids(),
+            channel_id=await self.bot.approvals_channel_id(),
+        )
 
     async def notify_issue_filed(
         self,
@@ -121,24 +126,28 @@ class NotificationService:
             episode=episode,
             message=message,
         )
-        await self._broadcast_to_admins(embeds, lambda: build_issue_view(issue_id))
+        await self._broadcast(
+            embeds,
+            lambda: build_issue_view(issue_id),
+            recipient_ids=await self.bot.issue_notify_ids(),
+            channel_id=await self.bot.issues_channel_id(),
+        )
 
-    async def _broadcast_to_admins(self, embeds, make_view) -> None:  # type: ignore[no-untyped-def]
-        """DM each admin and post to the approvals channel; a fresh view per send."""
-        for admin_id in await self.bot.admin_ids():
+    async def _broadcast(self, embeds, make_view, *, recipient_ids, channel_id) -> None:  # type: ignore[no-untyped-def]
+        """DM each recipient and post to the channel; a fresh view per send."""
+        for user_id in recipient_ids:
             try:
-                user = await self.bot.fetch_user(admin_id)
+                user = await self.bot.fetch_user(user_id)
             except (discord.NotFound, discord.HTTPException, ValueError) as exc:
-                logger.warning("Could not resolve admin %s: %s", admin_id, exc)
+                logger.warning("Could not resolve recipient %s: %s", user_id, exc)
                 continue
             try:
                 await user.send(embeds=embeds, view=make_view())
             except discord.Forbidden:
-                logger.info("Admin %s has DMs disabled; skipping", admin_id)
+                logger.info("Recipient %s has DMs disabled; skipping", user_id)
             except discord.HTTPException as exc:
-                logger.warning("Failed to DM admin %s: %s", admin_id, exc)
+                logger.warning("Failed to DM recipient %s: %s", user_id, exc)
 
-        channel_id = await self.bot.approvals_channel_id()
         if channel_id is not None:
             try:
                 channel = self.bot.get_channel(channel_id) or await self.bot.fetch_channel(
@@ -146,7 +155,7 @@ class NotificationService:
                 )
                 await channel.send(embeds=embeds, view=make_view())
             except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
-                logger.warning("Could not post to approvals channel %s: %s", channel_id, exc)
+                logger.warning("Could not post to channel %s: %s", channel_id, exc)
 
     # -- targeted checks (used by the Seerr webhook for instant delivery) ----
 
