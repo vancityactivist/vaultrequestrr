@@ -519,9 +519,9 @@ class WebDashboard:
                   <input type="hidden" name="issue_id" value="{it.issue_id}">
                   <button>{action_label}</button>
                 </form>
-                <form method="post" action="/issues/research" onsubmit="return confirm('Delete the current file and search for a replacement?')">
+                <form method="post" action="/issues/research" onsubmit="return confirm('Find a replacement release and grab it, replacing the current file? The issue is resolved only if a release is grabbed.')">
                   <input type="hidden" name="issue_id" value="{it.issue_id}">
-                  <button class="warn">Re-search</button>
+                  <button class="warn">Re-grab</button>
                 </form>
               </td>
             </tr>"""
@@ -975,7 +975,17 @@ class WebDashboard:
             )
         except (ArrError, SeerrError) as exc:
             raise web.HTTPFound("/issues?msg=" + _q(str(exc)))
-        raise web.HTTPFound("/issues?msg=" + _q(result))
+
+        # Only resolve the issue when a replacement was actually grabbed.
+        message = result.message
+        if result.grabbed:
+            try:
+                await self.bot.seerr.update_issue_status(issue_id, resolved=True)
+                await self.bot.store.mark_issue(issue_id, status=ISSUE_RESOLVED)
+                message += " Issue resolved."
+            except SeerrError as exc:
+                message += f" (couldn't resolve the issue in Seerr: {exc})"
+        raise web.HTTPFound("/issues?msg=" + _q(message))
 
     # -- media detail (direct Radarr/Sonarr view) --------------------------
 
@@ -1062,11 +1072,11 @@ class WebDashboard:
         <div class="card">
           <h2>Actions</h2>
           <div class="actions">
-            <form method="post" action="/media/research" onsubmit="return confirm('Delete the current file and search for a replacement?')">
+            <form method="post" action="/media/research" onsubmit="return confirm('Find a replacement release and grab it, replacing the current file?')">
               <input type="hidden" name="type" value="{html.escape(d["media_type"])}">
               <input type="hidden" name="tmdb" value="{d["tmdb_id"]}">
               {season_episode}
-              <button class="warn">Delete &amp; auto-search</button>
+              <button class="warn">Find &amp; re-grab</button>
             </form>
             <a class="btn" href="/media/search?{self._media_query(d["media_type"], d["tmdb_id"], d["season"], d["episode"])}">Manual search</a>
             <a class="btn ghost" href="/issues">Back to issues</a>
@@ -1090,7 +1100,7 @@ class WebDashboard:
             )
         except (ArrError, SeerrError) as exc:
             raise web.HTTPFound(back + "&msg=" + _q(str(exc)))
-        raise web.HTTPFound(back + "&msg=" + _q(result))
+        raise web.HTTPFound(back + "&msg=" + _q(result.message))
 
     async def media_search_page(self, request: web.Request) -> web.Response:
         media_type = request.query.get("type", "")
