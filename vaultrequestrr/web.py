@@ -1566,6 +1566,7 @@ _ICON_PATHS = {
     "clock": '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
     "server": '<rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/>',
     "approvals": '<path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>',
+    "coffee": '<path d="M18 8h1a4 4 0 0 1 0 8h-1"/><path d="M2 8h16v9a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4z"/><line x1="6" y1="1" x2="6" y2="4"/><line x1="10" y1="1" x2="10" y2="4"/><line x1="14" y1="1" x2="14" y2="4"/>',
 }
 
 # Sidebar nav: (href, label, icon). `label` doubles as the active-state key —
@@ -1615,7 +1616,7 @@ def _layout(title: str, body: str, *, nav: bool = True) -> str:
         <aside class="sidebar">
           <a class="brand" href="/"><img class="logo" src="/icon.png" alt="" width="30" height="30">VaultRequestrr</a>
           <nav class="navlist">{items}</nav>
-          <nav class="navlist foot"><a class="navitem" href="/logout">{_icon("logout")}<span>Sign out</span></a></nav>
+          <nav class="navlist foot"><a class="navitem" href="https://buymeacoffee.com/vancityactivist" target="_blank" rel="noopener noreferrer">{_icon("coffee")}<span>Buy me a coffee</span></a><a class="navitem" href="/logout">{_icon("logout")}<span>Sign out</span></a></nav>
         </aside>
         <div class="content">
           <header class="topbar">

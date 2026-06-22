@@ -5,6 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue?logo=python&logoColor=white)](Dockerfile)
 [![GHCR](https://img.shields.io/badge/GHCR-vaultrequestrr-2496ED?logo=docker&logoColor=white)](https://github.com/vancityactivist/vaultrequestrr/pkgs/container/vaultrequestrr)
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-vancityactivist-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/vancityactivist)
 
 A Discord bot for requesting movies and TV shows through
 [Seerr](https://github.com/seerr-team/seerr) (the unified successor to
