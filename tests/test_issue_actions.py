@@ -185,11 +185,13 @@ async def test_act_regrab_grabs_and_resolves(store):
 
     await act_regrab(bot, inter, 5)
 
-    assert inter.response.deferred is True       # acknowledged before the slow search
+    # Visible "in progress" state shown on the card before the slow search.
+    assert inter.response.edits and "Re-grabbing" in (inter.response.edits[0][0] or "")
+    assert inter.response.edits[0][1] is None     # buttons dropped while searching
     assert arr.calls == [("movie", 603, None, None)]
     assert seerr.status_updates == [(5, True)]   # resolved on a real grab
     assert (await store.get_tracked_issue(5)).status == ISSUE_RESOLVED
-    assert inter.original_edits and inter.original_edits[0][1] is None  # card finalised
+    assert inter.original_edits and inter.original_edits[-1][1] is None  # card finalised
 
 
 @pytest.mark.asyncio
@@ -204,8 +206,9 @@ async def test_act_regrab_no_release_keeps_issue_open(store):
 
     assert seerr.status_updates == []            # not resolved without a grab
     assert (await store.get_tracked_issue(5)).status == ISSUE_OPEN
-    assert inter.followup.messages and inter.followup.messages[0][1] is True
-    assert inter.original_edits == []            # card + buttons left intact for retry
+    # Outcome surfaced on the card, with the buttons restored for a retry.
+    assert inter.original_edits and "No releases found." in (inter.original_edits[-1][0] or "")
+    assert inter.original_edits[-1][1] is not None
 
 
 @pytest.mark.asyncio
