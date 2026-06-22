@@ -83,6 +83,18 @@ async def build_issue_embeds(
     return embeds
 
 
+async def _restore_card(
+    interaction: discord.Interaction, issue_id: int, content: str
+) -> None:
+    """Put a status line on the card and bring the Re-grab/Resolve buttons back."""
+    try:
+        await interaction.edit_original_response(
+            content=content, view=build_issue_view(issue_id)
+        )
+    except discord.HTTPException:
+        await interaction.followup.send(content, ephemeral=True)
+
+
 async def act_regrab(
     bot,  # type: ignore[no-untyped-def]
     interaction: discord.Interaction,
@@ -106,9 +118,15 @@ async def act_regrab(
         )
         return
 
-    # The interactive search hits indexers and can take several seconds, so
-    # acknowledge the click first (defer the message update) to beat the timeout.
-    await interaction.response.defer()
+    # The interactive search hits indexers and can take several seconds. Show a
+    # visible "in progress" state on the card (and drop the buttons so it can't
+    # be double-fired) instead of a silent defer, so every admin can see the
+    # click was registered while the search runs.
+    await interaction.response.edit_message(
+        content=f"⏳ Re-grabbing… searching indexers for **{tracked.title}**, "
+        "this can take a moment.",
+        view=None,
+    )
     try:
         result = await bot.arr.research(
             tracked.media_type,
@@ -117,12 +135,14 @@ async def act_regrab(
             episode=tracked.problem_episode,
         )
     except (ArrError, SeerrError) as exc:
-        await interaction.followup.send(f"⚠️ {exc}", ephemeral=True)
+        # Restore the buttons so the admin can retry, and surface the error on
+        # the card itself rather than in a fleeting ephemeral message.
+        await _restore_card(interaction, issue_id, f"⚠️ {exc}")
         return
 
     if not result.grabbed:
-        # Nothing grabbed: leave the card + buttons so the admin can retry.
-        await interaction.followup.send(f"ℹ️ {result.message}", ephemeral=True)
+        # Nothing grabbed: restore the card + buttons so the admin can retry.
+        await _restore_card(interaction, issue_id, f"ℹ️ {result.message}")
         return
 
     try:
