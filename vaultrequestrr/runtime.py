@@ -17,6 +17,7 @@ class RuntimeSettings:
     notify_on_declined: bool
     notify_on_issue_resolved: bool
     log_level: str
+    display_timezone: str = "UTC"
 
     @classmethod
     def from_config(cls, config: Config) -> "RuntimeSettings":

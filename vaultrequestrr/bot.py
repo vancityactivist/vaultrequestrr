@@ -187,6 +187,11 @@ class VaultRequestrr(commands.Bot):
         except SeerrError as exc:
             logger.warning("Could not verify Seerr connection: %s", exc)
 
+        # Restore display timezone preference.
+        tz = await self.store.get_setting("display_timezone")
+        if tz:
+            self.runtime.display_timezone = tz
+
         # Restore the Plex connection (web-UI configured, no env fallback).
         plex_token = await self.store.get_setting("plex_token")
         plex_machine_id = await self.store.get_setting("plex_machine_id")
