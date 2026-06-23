@@ -10,8 +10,9 @@ import hmac
 import html
 import logging
 import secrets
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiohttp import web
 
@@ -289,6 +290,7 @@ class WebDashboard:
         items = await self.bot.store.recent_tracked(100)
         # One query for all links so each row can show the Seerr id (Discord on hover).
         link_by_discord = {link.discord_id: link for link in await self.bot.store.list_links()}
+        tz = self.bot.runtime.display_timezone
         rows = ""
         for it in items:
             rows += f"""
@@ -297,7 +299,7 @@ class WebDashboard:
               <td>{html.escape(it.media_type)}</td>
               <td>{_requester_cell(it.discord_id, link_by_discord.get(it.discord_id))}</td>
               <td>{_status_badge(it)}</td>
-              <td>{html.escape((it.created_at or '')[:19])}</td>
+              <td>{html.escape(_format_utc(it.created_at, tz))}</td>
               <td class="actions"><button class="detailtoggle" data-id="{it.request_id}" aria-expanded="false">Details</button></td>
             </tr>
             <tr class="detailrow" id="detail-{it.request_id}" hidden>
@@ -353,6 +355,7 @@ class WebDashboard:
 
     async def invites_page(self, request: web.Request) -> web.Response:
         items = await self.bot.store.recent_invites(200)
+        tz = self.bot.runtime.display_timezone
         rows = ""
         for it in items:
             link = await self.bot.store.get(it.inviter_discord_id)
@@ -369,7 +372,7 @@ class WebDashboard:
               <td>{html.escape(who)}</td>
               <td>{html.escape(it.invited_email)}</td>
               <td>{badge}</td>
-              <td>{html.escape((it.created_at or '')[:19])}</td>
+              <td>{html.escape(_format_utc(it.created_at, tz))}</td>
             </tr>"""
         if not items:
             rows = _empty_row(4, "No invites sent yet.", "mail")
@@ -392,6 +395,7 @@ class WebDashboard:
             pending = []
             logger.debug("Could not load pending requests: %s", exc)
 
+        tz = self.bot.runtime.display_timezone
         rows = ""
         for req in pending:
             title = await self._resolve_request_title(req)
@@ -403,7 +407,7 @@ class WebDashboard:
               <td>{kind}</td>
               <td>{html.escape(req.requested_by_name or '—')}</td>
               <td>{html.escape(seasons)}</td>
-              <td>{html.escape((req.created_at or '')[:19])}</td>
+              <td>{html.escape(_format_utc(req.created_at, tz))}</td>
               <td class="actions">
                 <form method="post" action="/approvals/approve">
                   <input type="hidden" name="request_id" value="{req.id}">
@@ -482,6 +486,7 @@ class WebDashboard:
         except SeerrError as exc:
             logger.debug("Could not load live issue statuses: %s", exc)
 
+        tz = self.bot.runtime.display_timezone
         rows = ""
         for it in items:
             status = live.get(it.issue_id, it.status)
@@ -513,7 +518,7 @@ class WebDashboard:
               <td>{html.escape(type_label)}</td>
               <td>{html.escape(who)}</td>
               <td>{badge}</td>
-              <td>{html.escape((it.created_at or '')[:19])}</td>
+              <td>{html.escape(_format_utc(it.created_at, tz))}</td>
               <td class="actions">
                 {details_link}
                 <form method="post" action="/issues/{action}">
@@ -550,7 +555,7 @@ class WebDashboard:
         for r in reversed(get_records()):  # newest first
             if _LEVELS.get(r.level, 0) < min_level:
                 continue
-            ts = datetime.fromtimestamp(r.created).strftime("%m-%d %H:%M:%S")
+            ts = _format_ts(r.created, self.bot.runtime.display_timezone)
             lines += (
                 f'<div class="logline lvl-{html.escape(r.level)}">'
                 f'<span class="ts">{ts}</span>'
@@ -634,9 +639,12 @@ class WebDashboard:
             <label class="field">Log level
               <select name="log_level">{_log_options(rt.log_level)}</select>
             </label>
+            <label class="field">Dashboard timezone
+              <select name="display_timezone">{_tz_options(rt.display_timezone)}</select>
+            </label>
             <button type="submit">Save settings</button>
           </form>
-          <p class="muted small">These apply immediately but reset to env defaults on restart.</p>
+          <p class="muted small">These apply immediately but reset to env defaults on restart (timezone is persisted in the database).</p>
         </div>"""
 
         # Grouped into tabs so the page reads as sections rather than one long
@@ -1529,7 +1537,106 @@ class WebDashboard:
         if level in ("DEBUG", "INFO", "WARNING", "ERROR"):
             rt.log_level = level
             logging.getLogger("vaultrequestrr").setLevel(level)
+        tz = str(data.get("display_timezone", "UTC")).strip()
+        try:
+            ZoneInfo(tz)
+            rt.display_timezone = tz
+            await self.bot.store.set_setting("display_timezone", tz)
+        except (ZoneInfoNotFoundError, KeyError):
+            pass
         raise web.HTTPFound("/settings?msg=" + _q("Settings saved."))
+
+
+# ---------------------------------------------------------------------------
+# Timezone helpers
+# ---------------------------------------------------------------------------
+
+# Common timezones grouped for the settings selector.
+_TZ_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
+    ("UTC", [("UTC", "UTC")]),
+    ("Americas", [
+        ("America/New_York", "Eastern (ET)"),
+        ("America/Chicago", "Central (CT)"),
+        ("America/Denver", "Mountain (MT)"),
+        ("America/Los_Angeles", "Pacific (PT)"),
+        ("America/Anchorage", "Alaska (AKT)"),
+        ("Pacific/Honolulu", "Hawaii (HST)"),
+        ("America/Toronto", "Toronto"),
+        ("America/Vancouver", "Vancouver"),
+        ("America/Sao_Paulo", "São Paulo"),
+        ("America/Argentina/Buenos_Aires", "Buenos Aires"),
+        ("America/Mexico_City", "Mexico City"),
+    ]),
+    ("Europe", [
+        ("Europe/London", "London (GMT/BST)"),
+        ("Europe/Paris", "Paris (CET)"),
+        ("Europe/Berlin", "Berlin (CET)"),
+        ("Europe/Amsterdam", "Amsterdam"),
+        ("Europe/Madrid", "Madrid"),
+        ("Europe/Rome", "Rome"),
+        ("Europe/Stockholm", "Stockholm"),
+        ("Europe/Helsinki", "Helsinki"),
+        ("Europe/Athens", "Athens"),
+        ("Europe/Moscow", "Moscow"),
+    ]),
+    ("Asia / Pacific", [
+        ("Asia/Dubai", "Dubai (GST)"),
+        ("Asia/Kolkata", "India (IST)"),
+        ("Asia/Dhaka", "Dhaka (BST)"),
+        ("Asia/Bangkok", "Bangkok (ICT)"),
+        ("Asia/Singapore", "Singapore (SGT)"),
+        ("Asia/Shanghai", "China (CST)"),
+        ("Asia/Tokyo", "Japan (JST)"),
+        ("Asia/Seoul", "Seoul (KST)"),
+        ("Australia/Sydney", "Sydney (AEST)"),
+        ("Pacific/Auckland", "Auckland (NZST)"),
+    ]),
+    ("Africa / Middle East", [
+        ("Africa/Cairo", "Cairo (EET)"),
+        ("Africa/Johannesburg", "Johannesburg (SAST)"),
+        ("Africa/Lagos", "Lagos (WAT)"),
+        ("Asia/Jerusalem", "Jerusalem"),
+        ("Asia/Riyadh", "Riyadh (AST)"),
+    ]),
+]
+
+
+def _tz_options(current: str) -> str:
+    """<optgroup>/<option> markup for the timezone <select>."""
+    parts: list[str] = []
+    for group_label, entries in _TZ_GROUPS:
+        parts.append(f'<optgroup label="{html.escape(group_label)}">')
+        for tz_id, label in entries:
+            sel = ' selected' if tz_id == current else ''
+            parts.append(f'<option value="{html.escape(tz_id)}"{sel}>{html.escape(label)}</option>')
+        parts.append("</optgroup>")
+    return "".join(parts)
+
+
+def _resolve_tz(tz_name: str) -> ZoneInfo:
+    try:
+        return ZoneInfo(tz_name)
+    except (ZoneInfoNotFoundError, KeyError):
+        return ZoneInfo("UTC")
+
+
+def _format_utc(iso_str: str | None, tz_name: str) -> str:
+    """Convert a stored UTC ISO-8601 string to a display string in tz_name."""
+    if not iso_str:
+        return "—"
+    try:
+        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(_resolve_tz(tz_name)).strftime("%Y-%m-%d %H:%M")
+    except ValueError:
+        return iso_str[:19]
+
+
+def _format_ts(timestamp: float, tz_name: str) -> str:
+    """Convert a Unix timestamp to a display string in tz_name."""
+    dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+    return dt.astimezone(_resolve_tz(tz_name)).strftime("%m-%d %H:%M:%S")
 
 
 # ---------------------------------------------------------------------------

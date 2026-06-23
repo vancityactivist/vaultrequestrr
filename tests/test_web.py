@@ -111,6 +111,7 @@ class FakeBot:
             notify_on_declined=True,
             notify_on_issue_resolved=True,
             log_level="INFO",
+            display_timezone="UTC",
         )
         self.applied = None
         self.plex = None
