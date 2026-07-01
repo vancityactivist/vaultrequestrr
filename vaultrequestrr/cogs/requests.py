@@ -546,7 +546,7 @@ class SeasonSelectView(discord.ui.View):
 
 class SeasonSelect(discord.ui.Select):
     def __init__(self, details: TvDetails) -> None:
-        options = [discord.SelectOption(label="All seasons", value="all", default=True)]
+        options = [discord.SelectOption(label="All seasons", value="all")]
         seen: set[int] = set()
         for season in details.seasons:
             if season.season_number in seen:
@@ -569,6 +569,21 @@ class SeasonSelect(discord.ui.Select):
             min_values=1,
             max_values=len(options),
         )
+        # Mark "All seasons" selected to match SeasonSelectView's default state.
+        self._sync_defaults("all")
+
+    def _sync_defaults(self, selected: list[int] | str) -> None:
+        """Keep each option's ``default`` flag in step with the current selection.
+
+        Discord renders the dropdown from these flags on every re-render, so
+        without this the picker snaps back to whatever was marked default at
+        build time (i.e. "All seasons").
+        """
+        for opt in self.options:
+            if selected == "all":
+                opt.default = opt.value == "all"
+            else:
+                opt.default = opt.value != "all" and int(opt.value) in selected
 
     async def callback(self, interaction: discord.Interaction) -> None:
         view: SeasonSelectView = self.view  # type: ignore[assignment]
@@ -576,6 +591,7 @@ class SeasonSelect(discord.ui.Select):
             view.selected = "all"
         else:
             view.selected = [int(v) for v in self.values]
+        self._sync_defaults(view.selected)
         view.update_request_state()
         await interaction.response.edit_message(view=view)
 
