@@ -5,6 +5,7 @@ from vaultrequestrr.cogs.requests import (
     ConfirmView,
     ResultSelect,
     ResultSelectView,
+    SeasonSelect,
     SeasonSelectView,
     _my_requests_embed,
     _PageButton,
@@ -122,6 +123,31 @@ def test_season_view_skips_already_requested_season():
     v.selected = [2]  # not yet requested
     v.update_request_state()
     assert not v.request.disabled
+
+
+def _season_select(view):
+    return next(c for c in view.children if isinstance(c, SeasonSelect))
+
+
+def _defaults(select):
+    return {opt.value: opt.default for opt in select.options}
+
+
+def test_season_select_defaults_track_single_selection():
+    details = TvDetails(3, "Show", [SeasonInfo(1, available=True), SeasonInfo(2)])
+    v = SeasonSelectView(None, _tv(), details)
+    select = _season_select(v)
+
+    # Starts on "All seasons".
+    assert _defaults(select) == {"all": True, "1": False, "2": False}
+
+    # Picking a single season moves the default onto it, off "all".
+    select._sync_defaults([2])
+    assert _defaults(select) == {"all": False, "1": False, "2": True}
+
+    # Selecting "all" again flips back and clears the season defaults.
+    select._sync_defaults("all")
+    assert _defaults(select) == {"all": True, "1": False, "2": False}
 
 
 def _tracked(**kw):
