@@ -165,6 +165,12 @@ class RequestInfo:
     media_status: int | None  # STATUS_* code
     media_type: str | None
     tmdb_id: int | None
+    # Per-season availability: {seasonNumber: STATUS_* code}. Empty for movies
+    # and for shows Seerr reports no discrete seasons for. The show-level
+    # `media_status` is only a rollup — PARTIALLY_AVAILABLE means *some* season
+    # is present, not necessarily the one that was requested — so callers that
+    # care about a specific season must consult this map instead.
+    season_status: dict[int, int | None] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -525,12 +531,18 @@ class SeerrClient:
     async def get_request(self, request_id: int) -> RequestInfo:
         data = await self._get(f"request/{request_id}")
         media = data.get("media") or {}
+        season_status = {
+            s.get("seasonNumber"): s.get("status")
+            for s in (media.get("seasons") or [])
+            if s.get("seasonNumber") is not None
+        }
         return RequestInfo(
             id=data.get("id", request_id),
             request_status=data.get("status"),
             media_status=media.get("status"),
             media_type=media.get("mediaType"),
             tmdb_id=media.get("tmdbId"),
+            season_status=season_status,
         )
 
     async def approve_request(self, request_id: int) -> None:

@@ -18,6 +18,7 @@ from .seerr import (
     REQUEST_DECLINED,
     STATUS_AVAILABLE,
     STATUS_PARTIALLY_AVAILABLE,
+    RequestInfo,
     SeerrError,
     format_quota_line,
 )
@@ -30,6 +31,42 @@ logger = logging.getLogger(__name__)
 # poller relaxes to the (longer) configured POLL_INTERVAL_SECONDS as a backstop.
 ACTIVE_POLL_SECONDS = 120
 MIN_POLL_SECONDS = 30
+
+
+def _parse_tracked_seasons(seasons: str | None) -> list[int]:
+    """Season numbers from a TrackedRequest.seasons string, or [] for "all"/none."""
+    if not seasons or seasons == "all":
+        return []
+    numbers: list[int] = []
+    for part in seasons.split(","):
+        part = part.strip()
+        if part.isdigit():
+            numbers.append(int(part))
+    return numbers
+
+
+def _request_available(tracked: TrackedRequest, info: RequestInfo) -> bool:
+    """Whether a tracked request's content has landed and should trigger a DM.
+
+    The show-level ``media_status`` is only a rollup: for TV, PARTIALLY_AVAILABLE
+    means *some* season is present, not necessarily the requested one. So when a
+    request targets specific seasons we consult the per-season status instead —
+    otherwise a season that was already on the server (e.g. an existing S4) would
+    make a brand-new S1 request report "available" on the very next poll.
+    """
+    if info.media_status == STATUS_AVAILABLE:
+        return True
+    if tracked.media_type != "tv":
+        return False
+
+    wanted = _parse_tracked_seasons(tracked.seasons)
+    if wanted and info.season_status:
+        landed = (STATUS_AVAILABLE, STATUS_PARTIALLY_AVAILABLE)
+        return all(info.season_status.get(n) in landed for n in wanted)
+
+    # "All seasons" (or no per-season detail): fall back to the show-level rollup,
+    # where partial availability means content has started landing.
+    return info.media_status == STATUS_PARTIALLY_AVAILABLE
 
 
 class NotificationService:
@@ -229,10 +266,7 @@ class NotificationService:
             )
             return
 
-        available = info.media_status == STATUS_AVAILABLE or (
-            tracked.media_type == "tv" and info.media_status == STATUS_PARTIALLY_AVAILABLE
-        )
-        if available:
+        if _request_available(tracked, info):
             if runtime.notify_on_available and not tracked.notified_available:
                 await self._dm(tracked, available=True)
             await self.bot.store.mark_tracked(

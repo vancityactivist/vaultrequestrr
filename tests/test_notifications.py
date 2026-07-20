@@ -10,6 +10,7 @@ from vaultrequestrr.seerr import (
     REQUEST_DECLINED,
     REQUEST_PENDING,
     STATUS_AVAILABLE,
+    STATUS_PARTIALLY_AVAILABLE,
     STATUS_PROCESSING,
     IssueInfo,
     QuotaStatus,
@@ -93,8 +94,8 @@ class FakeBot:
         return getattr(self, "webhook_secret", "")
 
 
-async def _track(store, request_id=10, media_type="movie", title="The Matrix"):
-    await store.add_tracked_request(request_id, "42", media_type, 603, title, None)
+async def _track(store, request_id=10, media_type="movie", title="The Matrix", seasons=None):
+    await store.add_tracked_request(request_id, "42", media_type, 603, title, seasons)
 
 
 @pytest.mark.asyncio
@@ -143,6 +144,71 @@ async def test_no_dm_while_in_flight(store):
     assert bot.sent == []
     pending = await store.pending_tracked()
     assert len(pending) == 1 and pending[0].media_status == STATUS_PROCESSING
+
+
+@pytest.mark.asyncio
+async def test_no_dm_when_only_other_season_available(store):
+    """A pre-existing season making the show PARTIALLY_AVAILABLE must not falsely
+    mark a different requested season as landed (the S1-requested / S4-on-server bug)."""
+    await _track(store, media_type="tv", seasons="1")
+    info = RequestInfo(
+        id=10,
+        request_status=REQUEST_PENDING,
+        media_status=STATUS_PARTIALLY_AVAILABLE,  # show rollup: S4 is already present
+        media_type="tv",
+        tmdb_id=603,
+        season_status={1: STATUS_PROCESSING, 4: STATUS_AVAILABLE},
+    )
+    bot = FakeBot(store, FakeSeerr(info))
+    svc = NotificationService(bot)
+
+    await svc._poll()
+
+    assert bot.sent == []  # requested S1 hasn't landed — no DM
+    pending = await store.pending_tracked()
+    assert len(pending) == 1  # still in flight
+
+
+@pytest.mark.asyncio
+async def test_notifies_when_requested_season_lands(store):
+    await _track(store, media_type="tv", seasons="1")
+    info = RequestInfo(
+        id=10,
+        request_status=REQUEST_PENDING,
+        media_status=STATUS_PARTIALLY_AVAILABLE,
+        media_type="tv",
+        tmdb_id=603,
+        season_status={1: STATUS_AVAILABLE, 4: STATUS_AVAILABLE},
+    )
+    bot = FakeBot(store, FakeSeerr(info))
+    svc = NotificationService(bot)
+
+    await svc._poll()
+
+    assert bot.sent == [(42, "✅ Now available")]
+    assert await store.pending_tracked() == []  # finalised
+
+
+@pytest.mark.asyncio
+async def test_all_seasons_request_falls_back_to_show_rollup(store):
+    """An "all seasons" request has no specific target, so partial availability
+    (content has started landing) still triggers the DM."""
+    await _track(store, media_type="tv", seasons="all")
+    info = RequestInfo(
+        id=10,
+        request_status=REQUEST_PENDING,
+        media_status=STATUS_PARTIALLY_AVAILABLE,
+        media_type="tv",
+        tmdb_id=603,
+        season_status={1: STATUS_AVAILABLE, 2: STATUS_PROCESSING},
+    )
+    bot = FakeBot(store, FakeSeerr(info))
+    svc = NotificationService(bot)
+
+    await svc._poll()
+
+    assert bot.sent == [(42, "✅ Now available")]
+    assert await store.pending_tracked() == []
 
 
 @pytest.mark.asyncio
