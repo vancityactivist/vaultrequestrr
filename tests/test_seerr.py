@@ -290,6 +290,38 @@ async def test_tv_details_marks_available_and_requested_seasons():
     assert not by_num[3].available and not by_num[3].requested
 
 
+# -- get_request -----------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_request_parses_per_season_status():
+    payload = {
+        "id": 10,
+        "status": 2,
+        "media": {
+            "status": 4,  # show rollup: partially available
+            "mediaType": "tv",
+            "tmdbId": 603,
+            "seasons": [
+                {"seasonNumber": 1, "status": 3},  # requested season still processing
+                {"seasonNumber": 4, "status": 5},  # pre-existing season available
+            ],
+        },
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    client = make_client(handler)
+    try:
+        info = await client.get_request(10)
+    finally:
+        await client.aclose()
+
+    assert info.media_status == 4
+    assert info.season_status == {1: 3, 4: 5}
+
+
 # -- get_quota -------------------------------------------------------------
 
 
