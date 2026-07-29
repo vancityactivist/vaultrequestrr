@@ -522,7 +522,24 @@ class LinkStore:
         await self._conn.execute(
             "DELETE FROM tracked_issues WHERE issue_id = ?", (issue_id,)
         )
+        await self._conn.execute(
+            "DELETE FROM issue_messages WHERE issue_id = ?", (issue_id,)
+        )
         await self._conn.commit()
+
+    async def remove_resolved_issues(self) -> int:
+        """Delete every resolved issue (and its card records); returns the count."""
+        await self._conn.execute(
+            """
+            DELETE FROM issue_messages WHERE issue_id IN
+                (SELECT issue_id FROM tracked_issues WHERE status = 2)
+            """
+        )
+        cursor = await self._conn.execute(
+            "DELETE FROM tracked_issues WHERE status = 2"  # ISSUE_RESOLVED
+        )
+        await self._conn.commit()
+        return cursor.rowcount or 0
 
     # -- Plex invites (per-user quota + audit) -----------------------------
 

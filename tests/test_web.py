@@ -209,6 +209,9 @@ async def test_login_then_dashboard_and_links(client):
     assert home.status == 200
     text = await home.text()
     assert "Linked users" in text
+    # The two request tiles are distinct: Seerr's approval queue vs bot-tracked
+    # in-flight requests (conflating them made the count never match the list).
+    assert "Awaiting approval" in text and "Requests in flight" in text
 
     links = await cli.get("/links")
     body = await links.text()
@@ -346,6 +349,42 @@ async def test_issues_page_lists_and_resolves(client):
     assert dash.bot.seerr.status_updates == [(5, True)]
     one = await store.get_tracked_issue(5)
     assert one.status == 2  # ISSUE_RESOLVED
+
+
+@pytest.mark.asyncio
+async def test_issue_remove_requires_resolved(client):
+    cli, store, _dash = client
+    await store.add_tracked_issue(5, "42", "movie", 603, "The Matrix", 1, "bad", 1)
+    await cli.post("/login", data={"password": "secret"})
+
+    # Open issue: removal refused.
+    resp = await cli.post("/issues/remove", data={"issue_id": "5"}, allow_redirects=False)
+    assert resp.status == 302 and "Resolve" in resp.headers["Location"]
+    assert await store.get_tracked_issue(5) is not None
+
+    # Resolved issue: removed, along with its card records.
+    await store.mark_issue(5, status=2)
+    await store.add_issue_message(5, 100, 1)
+    resp = await cli.post("/issues/remove", data={"issue_id": "5"}, allow_redirects=False)
+    assert resp.status == 302 and "removed" in resp.headers["Location"]
+    assert await store.get_tracked_issue(5) is None
+    assert await store.list_issue_messages(5) == []
+
+
+@pytest.mark.asyncio
+async def test_issues_clear_removes_only_resolved(client):
+    cli, store, _dash = client
+    await store.add_tracked_issue(5, "42", "movie", 603, "Fixed", 1, "m", 2)
+    await store.add_tracked_issue(6, "42", "movie", 604, "Broken", 1, "m", 1)
+    await cli.post("/login", data={"password": "secret"})
+
+    page = await cli.get("/issues")
+    assert "Clear resolved" in await page.text()
+
+    resp = await cli.post("/issues/clear", allow_redirects=False)
+    assert resp.status == 302 and "Removed%201" in resp.headers["Location"]
+    assert await store.get_tracked_issue(5) is None
+    assert (await store.get_tracked_issue(6)).title == "Broken"  # open one survives
 
 
 @pytest.mark.asyncio

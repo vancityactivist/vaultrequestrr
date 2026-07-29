@@ -69,6 +69,8 @@ class WebDashboard:
                 web.post("/issues/resolve", self.issue_resolve_action),
                 web.post("/issues/reopen", self.issue_reopen_action),
                 web.post("/issues/research", self.issue_research_action),
+                web.post("/issues/remove", self.issue_remove_action),
+                web.post("/issues/clear", self.issues_clear_action),
                 web.get("/media", self.media_page),
                 web.post("/media/research", self.media_research_action),
                 web.get("/media/search", self.media_search_page),
@@ -207,7 +209,15 @@ class WebDashboard:
             seerr_ok, seerr_msg = False, str(exc)
 
         links = await self.bot.store.list_links()
-        pending = await self.bot.store.pending_tracked()
+        # Two different "pending" numbers, shown as two tiles: requests awaiting
+        # an admin's approval in Seerr, and bot-tracked requests still in flight
+        # (approved but not yet available). Conflating them made the tile count
+        # never match the Approvals page.
+        in_flight = await self.bot.store.pending_tracked()
+        try:
+            awaiting = str(len(await self.bot.seerr.list_pending_requests()))
+        except SeerrError:
+            awaiting = "?"
         msg = _flash(request)
 
         plex_ok = self.bot.plex is not None
@@ -223,7 +233,8 @@ class WebDashboard:
         {msg}
         <div class="grid">
           <div class="card stat"><span class="tileico">{_icon("users", 22)}</span><div class="num">{len(links)}</div><div class="muted">Linked users</div></div>
-          <div class="card stat"><span class="tileico">{_icon("clock", 22)}</span><div class="num">{len(pending)}</div><div class="muted">Pending requests</div></div>
+          <div class="card stat"><span class="tileico">{_icon("approvals", 22)}</span><div class="num">{awaiting}</div><div class="muted"><a href="/approvals">Awaiting approval</a></div></div>
+          <div class="card stat"><span class="tileico">{_icon("clock", 22)}</span><div class="num">{len(in_flight)}</div><div class="muted"><a href="/activity">Requests in flight</a></div></div>
           <div class="card stat"><span class="tileico">{_icon("mail", 22)}</span><div class="num">{invites_sent}</div><div class="muted"><a href="/invites">Invites sent</a></div></div>
           <div class="card stat"><span class="tileico">{_icon("server", 22)}</span><div class="num">{_dot(discord_ok)} Discord</div><div class="muted">{'Ready' if discord_ok else 'Connecting…'}</div></div>
           <div class="card stat"><span class="tileico">{_icon("server", 22)}</span><div class="num">{_dot(seerr_ok)} Seerr</div><div class="muted">{html.escape(seerr_msg)}</div></div>
@@ -503,6 +514,13 @@ class WebDashboard:
                 who = link.plex_username or link.email or it.discord_id
             action = "reopen" if resolved else "resolve"
             action_label = "Reopen" if resolved else "Resolve"
+            remove_form = ""
+            if resolved:
+                remove_form = f"""
+                <form method="post" action="/issues/remove" onsubmit="return confirm('Remove this resolved issue from the list?')">
+                  <input type="hidden" name="issue_id" value="{it.issue_id}">
+                  <button class="danger">Remove</button>
+                </form>"""
             title = it.title or "—"
             if it.problem_season is not None and it.problem_episode is not None:
                 title += f" S{it.problem_season:02d}E{it.problem_episode:02d}"
@@ -529,19 +547,30 @@ class WebDashboard:
                   <input type="hidden" name="issue_id" value="{it.issue_id}">
                   <button class="warn">Re-grab</button>
                 </form>
+                {remove_form}
               </td>
             </tr>"""
         if not items:
             rows = _empty_row(6, "No issues reported yet.", "issue")
 
+        clear_form = ""
+        if any(live.get(it.issue_id, it.status) == ISSUE_RESOLVED for it in items):
+            clear_form = """
+            <form method="post" action="/issues/clear" class="inline" onsubmit="return confirm('Remove all resolved issues from the list?')">
+              <button class="ghost">Clear resolved</button>
+            </form>"""
+
         body = f"""
         {_flash(request)}
         <div class="card">
           <h2>Reported issues ({len(items)})</h2>
+          {clear_form}
           <table>
             <thead><tr><th>Title</th><th>Type</th><th>Reporter</th><th>Status</th><th>When</th><th>Actions</th></tr></thead>
             <tbody>{rows}</tbody>
           </table>
+          <p class="muted small">Removing an issue only clears it from this list — the Seerr
+            record is untouched.</p>
         </div>
         """
         return _html(_layout("Issues", body))
@@ -998,6 +1027,39 @@ class WebDashboard:
             await self.bot.store.delete_issue_messages(issue_id)
         verb = "resolved" if resolved else "reopened"
         raise web.HTTPFound("/issues?msg=" + _q(f"Issue {verb}."))
+
+    async def issue_remove_action(self, request: web.Request) -> web.Response:
+        """Remove one resolved issue from the tracked list (Seerr keeps its record)."""
+        data = await request.post()
+        try:
+            issue_id = int(str(data.get("issue_id", "")))
+        except ValueError:
+            raise web.HTTPFound("/issues?msg=" + _q("Missing issue id."))
+        tracked = await self.bot.store.get_tracked_issue(issue_id)
+        if tracked is None:
+            raise web.HTTPFound("/issues?msg=" + _q("Issue not found."))
+        if tracked.status != ISSUE_RESOLVED:
+            # The page overlays live Seerr status, so the tracked one can lag a
+            # poll behind — double-check with Seerr before refusing.
+            live = None
+            try:
+                live = {i.id: i.status for i in await self.bot.seerr.list_issues()}.get(
+                    issue_id
+                )
+            except SeerrError:
+                pass
+            if live != ISSUE_RESOLVED:
+                raise web.HTTPFound(
+                    "/issues?msg=" + _q("Resolve the issue before removing it.")
+                )
+        await self.bot.store.remove_issue(issue_id)
+        raise web.HTTPFound("/issues?msg=" + _q("Issue removed."))
+
+    async def issues_clear_action(self, request: web.Request) -> web.Response:
+        """Remove every resolved issue from the tracked list in one go."""
+        count = await self.bot.store.remove_resolved_issues()
+        note = f"Removed {count} resolved issue{'s' if count != 1 else ''}."
+        raise web.HTTPFound("/issues?msg=" + _q(note))
 
     async def issue_research_action(self, request: web.Request) -> web.Response:
         data = await request.post()
