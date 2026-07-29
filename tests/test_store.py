@@ -285,3 +285,30 @@ async def test_regrab_columns_added_on_migration(tmp_path):
         assert (await s.get_tracked_issue(1)).regrab_state == "grabbed"
     finally:
         await s.close()
+
+
+@pytest.mark.asyncio
+async def test_remove_resolved_issues_bulk(store):
+    await store.add_tracked_issue(1, "42", "movie", 1, "A", 1, "m", 2)  # resolved
+    await store.add_tracked_issue(2, "42", "movie", 2, "B", 1, "m", 1)  # open
+    await store.add_tracked_issue(3, "42", "movie", 3, "C", 1, "m", 2)  # resolved
+    await store.add_issue_message(1, 100, 10)
+    await store.add_issue_message(2, 100, 20)
+
+    removed = await store.remove_resolved_issues()
+
+    assert removed == 2
+    assert await store.get_tracked_issue(1) is None
+    assert await store.get_tracked_issue(3) is None
+    assert (await store.get_tracked_issue(2)).title == "B"
+    assert await store.list_issue_messages(1) == []      # cards cleaned up too
+    assert len(await store.list_issue_messages(2)) == 1  # open issue's kept
+
+
+@pytest.mark.asyncio
+async def test_remove_issue_cleans_card_records(store):
+    await store.add_tracked_issue(1, "42", "movie", 1, "A", 1, "m", 2)
+    await store.add_issue_message(1, 100, 10)
+    await store.remove_issue(1)
+    assert await store.get_tracked_issue(1) is None
+    assert await store.list_issue_messages(1) == []
