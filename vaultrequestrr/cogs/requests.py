@@ -493,7 +493,10 @@ class ResultSelect(discord.ui.Select):
             )
             return
 
-        view = SeasonSelectView(self._cog, result, details, anime=self._anime)
+        view = SeasonSelectView(
+            self._cog, result, details, anime=self._anime,
+            allow_all=self._cog.bot.runtime.allow_all_seasons,
+        )
         await interaction.edit_original_response(
             content=None, embed=_media_embed(result), view=view
         )
@@ -502,17 +505,20 @@ class ResultSelect(discord.ui.Select):
 class SeasonSelectView(discord.ui.View):
     def __init__(
         self, cog: RequestCog, result: SearchResult, details: TvDetails,
-        *, anime: bool = False,
+        *, anime: bool = False, allow_all: bool = True,
     ) -> None:
         super().__init__(timeout=INTERACTION_TIMEOUT)
         self._cog = cog
         self._result = result
         self._anime = anime
-        self.selected: list[int] | str = "all"
+        # When "All seasons" is disabled (admin setting, for season-quota
+        # servers) users start with nothing selected and must pick seasons.
+        self.allow_all = allow_all
+        self.selected: list[int] | str = "all" if allow_all else []
         self._available = {s.season_number for s in details.seasons if s.available}
         self._requested = {s.season_number for s in details.seasons if s.requested}
         self._all = {s.season_number for s in details.seasons}
-        self.add_item(SeasonSelect(details))
+        self.add_item(SeasonSelect(details, allow_all=allow_all))
         self.update_request_state()
 
     def _selected_numbers(self) -> set[int]:
@@ -545,8 +551,10 @@ class SeasonSelectView(discord.ui.View):
 
 
 class SeasonSelect(discord.ui.Select):
-    def __init__(self, details: TvDetails) -> None:
-        options = [discord.SelectOption(label="All seasons", value="all")]
+    def __init__(self, details: TvDetails, *, allow_all: bool = True) -> None:
+        options = (
+            [discord.SelectOption(label="All seasons", value="all")] if allow_all else []
+        )
         seen: set[int] = set()
         for season in details.seasons:
             if season.season_number in seen:
@@ -564,13 +572,14 @@ class SeasonSelect(discord.ui.Select):
                 )
             )
         super().__init__(
-            placeholder="Choose season(s) (default: all)…",
+            placeholder="Choose season(s) (default: all)…" if allow_all else "Choose season(s)…",
             options=options,
             min_values=1,
             max_values=len(options),
         )
-        # Mark "All seasons" selected to match SeasonSelectView's default state.
-        self._sync_defaults("all")
+        # Mirror SeasonSelectView's default state: "All seasons" when offered,
+        # otherwise an empty selection the user has to fill in.
+        self._sync_defaults("all" if allow_all else [])
 
     def _sync_defaults(self, selected: list[int] | str) -> None:
         """Keep each option's ``default`` flag in step with the current selection.
@@ -587,10 +596,10 @@ class SeasonSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction) -> None:
         view: SeasonSelectView = self.view  # type: ignore[assignment]
-        if "all" in self.values or not self.values:
+        if view.allow_all and ("all" in self.values or not self.values):
             view.selected = "all"
         else:
-            view.selected = [int(v) for v in self.values]
+            view.selected = [int(v) for v in self.values if v != "all"]
         self._sync_defaults(view.selected)
         view.update_request_state()
         await interaction.response.edit_message(view=view)

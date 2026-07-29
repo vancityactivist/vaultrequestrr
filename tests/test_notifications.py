@@ -37,7 +37,7 @@ class FakeUser:
         self._sink = sink
         self._embeds = embeds
 
-    async def send(self, embed=None, embeds=None):
+    async def send(self, embed=None, embeds=None, view=None):
         items = embeds if embeds is not None else ([embed] if embed else [])
         title = next((e.title for e in items if e.title), None)
         self._sink.append((self.id, title))
@@ -49,6 +49,7 @@ class FakeSeerr:
         self.info = info
         self.exc = exc
         self.issues = issues or []
+        self.status_updates = []
 
     async def get_request(self, request_id):
         if self.exc:
@@ -58,12 +59,28 @@ class FakeSeerr:
     async def list_issues(self, *, take=100):
         return self.issues
 
+    async def update_issue_status(self, issue_id, *, resolved):
+        self.status_updates.append((issue_id, resolved))
+
     async def get_poster_url(self, media_type, tmdb_id):
         return f"https://image.tmdb.org/t/p/w500/{tmdb_id}.jpg"
 
     async def get_quota(self, user_id):
         q = QuotaStatus(limit=5, used=2, remaining=3, restricted=False, days=7)
         return UserQuota(movie=q, tv=q)
+
+
+class FakeArr:
+    """media_detail stub for the re-grab import watcher."""
+
+    def __init__(self, *, queue=(), has_file=False):
+        self.queue = list(queue)
+        self.has_file = has_file
+        self.calls = []
+
+    async def media_detail(self, media_type, tmdb_id, *, season=None, episode=None):
+        self.calls.append((media_type, tmdb_id, season, episode))
+        return {"queue": self.queue, "has_file": self.has_file}
 
 
 class FakeBot:
@@ -84,6 +101,7 @@ class FakeBot:
             notify_on_declined=notify_declined,
             notify_on_issue_resolved=notify_issue_resolved,
         )
+        self.arr = FakeArr()
         self.sent = []
         self.embeds = []
 
@@ -92,6 +110,12 @@ class FakeBot:
 
     async def effective_webhook_secret(self):
         return getattr(self, "webhook_secret", "")
+
+    async def issue_notify_ids(self):
+        return {1}
+
+    async def issues_channel_id(self):
+        return None
 
 
 async def _track(store, request_id=10, media_type="movie", title="The Matrix", seasons=None):
@@ -272,6 +296,87 @@ async def test_resolved_issue_finalised_without_dm_when_off(store):
 
     assert bot.sent == []
     assert await store.pending_issues() == []  # still finalised
+
+
+# -- re-grab import watching -------------------------------------------------
+
+
+def _ago(seconds):
+    from datetime import datetime, timedelta, timezone
+
+    return (datetime.now(timezone.utc) - timedelta(seconds=seconds)).isoformat()
+
+
+async def _regrab_issue(store, *, at, release="New.Release", by="1"):
+    await store.add_tracked_issue(
+        5, "42", "movie", 603, "The Matrix", ISSUE_VIDEO, "broken", ISSUE_OPEN
+    )
+    await store.mark_issue(
+        5, regrab_state="grabbed", regrab_release=release, regrab_by=by, regrab_at=at
+    )
+
+
+@pytest.mark.asyncio
+async def test_regrab_resolves_only_after_import(store):
+    await _regrab_issue(store, at=_ago(300))
+    seerr = FakeSeerr(issues=[_issue(status=ISSUE_OPEN)])
+    bot = FakeBot(store, seerr)
+    bot.arr = FakeArr(queue=[], has_file=True)  # download finished & imported
+    svc = NotificationService(bot)
+
+    await svc._poll()
+
+    assert seerr.status_updates == [(5, True)]
+    tracked = await store.get_tracked_issue(5)
+    assert tracked.regrab_state == "imported"
+    assert tracked.status == ISSUE_RESOLVED and tracked.notified_resolved
+    assert (42, "🛠️ Issue resolved") in bot.sent  # reporter DM'd on import
+
+
+@pytest.mark.asyncio
+async def test_regrab_waits_while_still_downloading(store):
+    await _regrab_issue(store, at=_ago(300))
+    seerr = FakeSeerr(issues=[_issue(status=ISSUE_OPEN)])
+    bot = FakeBot(store, seerr)
+    bot.arr = FakeArr(queue=[{"title": "x", "progress": 40}], has_file=False)
+    svc = NotificationService(bot)
+
+    await svc._poll()
+
+    assert seerr.status_updates == []
+    tracked = await store.get_tracked_issue(5)
+    assert tracked.regrab_state == "grabbed" and tracked.status == ISSUE_OPEN
+
+
+@pytest.mark.asyncio
+async def test_regrab_grace_period_before_first_check(store):
+    """Right after the grab the queue may be empty — don't judge yet."""
+    await _regrab_issue(store, at=_ago(10))
+    bot = FakeBot(store, FakeSeerr(issues=[_issue(status=ISSUE_OPEN)]))
+    bot.arr = FakeArr(queue=[], has_file=False)
+    svc = NotificationService(bot)
+
+    await svc._poll()
+
+    assert bot.arr.calls == []  # not even inspected yet
+    assert (await store.get_tracked_issue(5)).regrab_state == "grabbed"
+
+
+@pytest.mark.asyncio
+async def test_regrab_failure_reopens_and_renotifies(store):
+    """Queue empty + no file long after the grab: the download died. Flag it."""
+    await _regrab_issue(store, at=_ago(30 * 60))
+    seerr = FakeSeerr(issues=[_issue(status=ISSUE_OPEN)])
+    bot = FakeBot(store, seerr)
+    bot.arr = FakeArr(queue=[], has_file=False)
+    svc = NotificationService(bot)
+
+    await svc._poll()
+
+    assert seerr.status_updates == []             # issue stays open
+    tracked = await store.get_tracked_issue(5)
+    assert tracked.regrab_state == "failed" and tracked.status == ISSUE_OPEN
+    assert (1, "⚠️ Re-grab failed") in bot.sent   # admins get actionable cards back
 
 
 @pytest.mark.asyncio

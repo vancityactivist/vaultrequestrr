@@ -212,3 +212,76 @@ async def test_arr_default_is_unique_per_kind(store):
     assert (await store.get_arr_instance(s.id)).is_default is True
     assert len(await store.list_arr_instances()) == 3
     assert len(await store.list_arr_instances("sonarr")) == 1
+
+
+# -- re-grab lifecycle + issue card copies ----------------------------------
+
+
+@pytest.mark.asyncio
+async def test_regrab_lifecycle_fields(store):
+    await store.add_tracked_issue(5, "42", "movie", 603, "M", 1, "m", 1)
+    await store.mark_issue(
+        5, regrab_state="grabbed", regrab_release="Some.Release",
+        regrab_by="99", regrab_at="2026-07-29T00:00:00+00:00",
+    )
+    one = await store.get_tracked_issue(5)
+    assert one.regrab_state == "grabbed"
+    assert one.regrab_release == "Some.Release"
+    assert one.regrab_by == "99" and one.regrab_at
+
+    waiting = await store.issues_awaiting_import()
+    assert [i.issue_id for i in waiting] == [5]
+
+    await store.mark_issue(5, regrab_state="imported")
+    assert await store.issues_awaiting_import() == []
+
+
+@pytest.mark.asyncio
+async def test_awaiting_import_excludes_finalised_issues(store):
+    await store.add_tracked_issue(5, "42", "movie", 603, "M", 1, "m", 1)
+    await store.mark_issue(5, regrab_state="grabbed", notified_resolved=True)
+    assert await store.issues_awaiting_import() == []
+
+
+@pytest.mark.asyncio
+async def test_issue_messages_roundtrip(store):
+    await store.add_issue_message(5, 100, 1)
+    await store.add_issue_message(5, 200, 2)
+    await store.add_issue_message(5, 200, 2)  # duplicate is a no-op
+    await store.add_issue_message(6, 300, 3)
+
+    records = await store.list_issue_messages(5)
+    assert {(r.channel_id, r.message_id) for r in records} == {(100, 1), (200, 2)}
+
+    await store.delete_issue_messages(5)
+    assert await store.list_issue_messages(5) == []
+    assert len(await store.list_issue_messages(6)) == 1
+
+
+@pytest.mark.asyncio
+async def test_regrab_columns_added_on_migration(tmp_path):
+    """A DB created before the re-grab columns shipped gets them on connect."""
+    import aiosqlite
+
+    path = str(tmp_path / "old.sqlite3")
+    async with aiosqlite.connect(path) as db:
+        await db.execute(
+            """
+            CREATE TABLE tracked_issues (
+                issue_id INTEGER PRIMARY KEY, discord_id TEXT NOT NULL,
+                media_type TEXT, tmdb_id INTEGER, title TEXT, issue_type INTEGER,
+                message TEXT, status INTEGER, notified_resolved INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL, updated_at TEXT
+            )
+            """
+        )
+        await db.commit()
+
+    s = LinkStore(path)
+    await s.connect()
+    try:
+        await s.add_tracked_issue(1, "42", "movie", 603, "M", 1, "m", 1)
+        await s.mark_issue(1, regrab_state="grabbed")
+        assert (await s.get_tracked_issue(1)).regrab_state == "grabbed"
+    finally:
+        await s.close()

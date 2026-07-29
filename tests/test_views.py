@@ -150,6 +150,32 @@ def test_season_select_defaults_track_single_selection():
     assert _defaults(select) == {"all": True, "1": False, "2": False}
 
 
+def test_season_select_without_all_seasons_option():
+    """With the admin toggle off, "All seasons" is not offered and nothing is
+    preselected — users must pick individual seasons (season-quota servers)."""
+    details = TvDetails(3, "Show", [SeasonInfo(1), SeasonInfo(2)])
+    v = SeasonSelectView(None, _tv(), details, allow_all=False)
+    select = _season_select(v)
+
+    assert "all" not in {opt.value for opt in select.options}
+    assert v.selected == []
+    assert v.request.disabled  # nothing selected yet
+    assert _defaults(select) == {"1": False, "2": False}
+
+    # Picking a season enables the request.
+    v.selected = [2]
+    v.update_request_state()
+    assert not v.request.disabled
+
+
+def test_season_view_allows_all_by_default():
+    details = TvDetails(3, "Show", [SeasonInfo(1), SeasonInfo(2)])
+    v = SeasonSelectView(None, _tv(), details)
+    select = _season_select(v)
+    assert v.allow_all and v.selected == "all"
+    assert "all" in {opt.value for opt in select.options}
+
+
 def _tracked(**kw):
     base = dict(
         request_id=1, discord_id="42", media_type="movie", tmdb_id=1, title="M",

@@ -525,7 +525,7 @@ class WebDashboard:
                   <input type="hidden" name="issue_id" value="{it.issue_id}">
                   <button>{action_label}</button>
                 </form>
-                <form method="post" action="/issues/research" onsubmit="return confirm('Find a replacement release and grab it, replacing the current file? The issue is resolved only if a release is grabbed.')">
+                <form method="post" action="/issues/research" onsubmit="return confirm('Find a replacement release and grab it, replacing the current file? The issue is resolved automatically once the replacement downloads and imports.')">
                   <input type="hidden" name="issue_id" value="{it.issue_id}">
                   <button class="warn">Re-grab</button>
                 </form>
@@ -636,6 +636,8 @@ class WebDashboard:
             <label class="check"><input type="checkbox" name="notify_on_available" {_checked(rt.notify_on_available)}> DM users when media becomes available</label>
             <label class="check"><input type="checkbox" name="notify_on_declined" {_checked(rt.notify_on_declined)}> DM users when a request is declined</label>
             <label class="check"><input type="checkbox" name="notify_on_issue_resolved" {_checked(rt.notify_on_issue_resolved)}> DM users when their reported issue is resolved</label>
+            <label class="check"><input type="checkbox" name="allow_all_seasons" {_checked(rt.allow_all_seasons)}> Allow users to request “All seasons” of a show<br>
+              <span class="muted small">Untick on servers with strict season quotas — users then have to pick individual seasons.</span></label>
             <label class="field">Log level
               <select name="log_level">{_log_options(rt.log_level)}</select>
             </label>
@@ -644,7 +646,7 @@ class WebDashboard:
             </label>
             <button type="submit">Save settings</button>
           </form>
-          <p class="muted small">These apply immediately but reset to env defaults on restart (timezone is persisted in the database).</p>
+          <p class="muted small">These apply immediately but reset to env defaults on restart (the timezone and the “All seasons” toggle are persisted in the database).</p>
         </div>"""
 
         # Grouped into tabs so the page reads as sections rather than one long
@@ -988,6 +990,12 @@ class WebDashboard:
         await self.bot.store.mark_issue(
             issue_id, status=ISSUE_RESOLVED if resolved else ISSUE_OPEN
         )
+        if resolved:
+            # Strip the live Re-grab/Resolve buttons from every Discord card.
+            from .issue_actions import sync_issue_cards
+
+            await sync_issue_cards(self.bot, issue_id, "✅ Resolved via the dashboard.")
+            await self.bot.store.delete_issue_messages(issue_id)
         verb = "resolved" if resolved else "reopened"
         raise web.HTTPFound("/issues?msg=" + _q(f"Issue {verb}."))
 
@@ -1000,6 +1008,15 @@ class WebDashboard:
         tracked = await self.bot.store.get_tracked_issue(issue_id)
         if tracked is None or tracked.tmdb_id is None or not tracked.media_type:
             raise web.HTTPFound("/issues?msg=" + _q("Can't re-search this issue."))
+        from .issue_actions import _regrab_in_flight
+
+        if tracked.status == ISSUE_RESOLVED:
+            raise web.HTTPFound("/issues?msg=" + _q("Issue is already resolved."))
+        if _regrab_in_flight(tracked):
+            raise web.HTTPFound(
+                "/issues?msg="
+                + _q("A re-grab is already in flight — waiting for it to import.")
+            )
         try:
             result = await self.bot.arr.research(
                 tracked.media_type,
@@ -1010,15 +1027,18 @@ class WebDashboard:
         except (ArrError, SeerrError) as exc:
             raise web.HTTPFound("/issues?msg=" + _q(str(exc)))
 
-        # Only resolve the issue when a replacement was actually grabbed.
+        # A grab doesn't resolve the issue: the notification poller resolves it
+        # (and DMs the reporter) once the replacement actually imports.
         message = result.message
         if result.grabbed:
-            try:
-                await self.bot.seerr.update_issue_status(issue_id, resolved=True)
-                await self.bot.store.mark_issue(issue_id, status=ISSUE_RESOLVED)
-                message += " Issue resolved."
-            except SeerrError as exc:
-                message += f" (couldn't resolve the issue in Seerr: {exc})"
+            await self.bot.store.mark_issue(
+                issue_id,
+                regrab_state="grabbed",
+                regrab_release=result.release or "",
+                regrab_by="dashboard",
+                regrab_at=datetime.now(timezone.utc).isoformat(),
+            )
+            message += " The issue will be resolved once the replacement imports."
         raise web.HTTPFound("/issues?msg=" + _q(message))
 
     # -- media detail (direct Radarr/Sonarr view) --------------------------
@@ -1533,6 +1553,10 @@ class WebDashboard:
         rt.notify_on_available = "notify_on_available" in data
         rt.notify_on_declined = "notify_on_declined" in data
         rt.notify_on_issue_resolved = "notify_on_issue_resolved" in data
+        rt.allow_all_seasons = "allow_all_seasons" in data
+        await self.bot.store.set_setting(
+            "allow_all_seasons", "1" if rt.allow_all_seasons else "0"
+        )
         level = str(data.get("log_level", rt.log_level)).upper()
         if level in ("DEBUG", "INFO", "WARNING", "ERROR"):
             rt.log_level = level

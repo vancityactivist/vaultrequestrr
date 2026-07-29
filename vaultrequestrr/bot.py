@@ -192,6 +192,11 @@ class VaultRequestrr(commands.Bot):
         if tz:
             self.runtime.display_timezone = tz
 
+        # Restore the "All seasons" picker toggle.
+        allow_all = await self.store.get_setting("allow_all_seasons")
+        if allow_all is not None:
+            self.runtime.allow_all_seasons = allow_all != "0"
+
         # Restore the Plex connection (web-UI configured, no env fallback).
         plex_token = await self.store.get_setting("plex_token")
         plex_machine_id = await self.store.get_setting("plex_machine_id")

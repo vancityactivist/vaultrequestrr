@@ -6,22 +6,88 @@ buttons. The custom_ids encode the issue id and are registered via
 ``bot.add_dynamic_items`` in setup_hook, so the buttons keep working across
 restarts.
 
-* **Re-grab** runs the same monitor → interactive-search → grab flow as the
-  dashboard (``ArrManager.research``) and resolves the issue only if a release
-  is actually grabbed.
+* **Re-grab** runs the monitor → interactive-search → grab flow
+  (``ArrManager.research``). A grab does *not* resolve the issue — the
+  notification poller watches the arr queue and resolves only once the
+  replacement actually imports (see ``NotificationService._poll_regrabs``).
 * **Resolve** just marks the issue resolved in Seerr.
+
+Every admin DM (plus the channel post) is its own copy of the card, so
+outcomes are synced to all copies via :func:`sync_issue_cards` — otherwise the
+other copies keep live buttons and a second admin can fire a duplicate re-grab.
 """
 from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime, timezone
 
 import discord
 
 from .arr import ArrError
 from .seerr import ISSUE_RESOLVED, ISSUE_TYPE_LABELS, SeerrError
+from .store import TrackedIssue
 
 logger = logging.getLogger(__name__)
+
+# An in-flight re-grab blocks further re-grabs. After this long without an
+# import we assume the download is stuck and let an admin fire a fresh one.
+REGRAB_STALE_SECONDS = 6 * 60 * 60
+
+
+def age_seconds(iso_timestamp: str | None) -> float:
+    """Seconds since an ISO timestamp; infinity when missing/unparseable."""
+    if not iso_timestamp:
+        return float("inf")
+    try:
+        then = datetime.fromisoformat(iso_timestamp)
+    except ValueError:
+        return float("inf")
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - then).total_seconds()
+
+
+def _regrab_in_flight(tracked: TrackedIssue) -> bool:
+    return (
+        tracked.regrab_state == "grabbed"
+        and age_seconds(tracked.regrab_at) < REGRAB_STALE_SECONDS
+    )
+
+
+async def sync_issue_cards(
+    bot,  # type: ignore[no-untyped-def]
+    issue_id: int,
+    content: str,
+    *,
+    view: discord.ui.View | None = None,
+    skip_message_id: int | None = None,
+) -> None:
+    """Propagate an outcome to every broadcast copy of an issue's card.
+
+    Best-effort: copies that can't be edited (deleted message, closed DM) are
+    skipped. ``skip_message_id`` avoids re-editing the card the admin clicked,
+    which the interaction response already updated.
+    """
+    try:
+        records = await bot.store.list_issue_messages(issue_id)
+    except Exception:  # noqa: BLE001 - syncing must never fail the action
+        logger.debug("Could not load card copies for issue %s", issue_id, exc_info=True)
+        return
+    for record in records:
+        if skip_message_id is not None and record.message_id == skip_message_id:
+            continue
+        try:
+            channel = bot.get_channel(record.channel_id) or await bot.fetch_channel(
+                record.channel_id
+            )
+            await channel.get_partial_message(record.message_id).edit(
+                content=content, view=view
+            )
+        except (discord.HTTPException, AttributeError) as exc:
+            logger.debug(
+                "Could not sync issue %s card %s: %s", issue_id, record.message_id, exc
+            )
 
 
 def build_issue_view(issue_id: int) -> discord.ui.View:
@@ -102,8 +168,10 @@ async def act_regrab(
 ) -> None:
     """Delete & re-grab a replacement for the issue's media, gated to admins.
 
-    Resolves the issue only when a release is actually grabbed; otherwise the
-    card is left in place so an admin can retry or resolve manually.
+    A successful grab does *not* resolve the issue: the poller resolves it (and
+    DMs the reporter) only once the replacement finishes downloading and
+    imports. On failure the card is left in place so an admin can retry or
+    resolve manually.
     """
     if not await bot.is_issue_handler(interaction.user.id):
         await interaction.response.send_message(
@@ -115,6 +183,22 @@ async def act_regrab(
     if tracked is None or tracked.tmdb_id is None or not tracked.media_type:
         await interaction.response.send_message(
             "⚠️ Can't re-grab this issue — no media is recorded for it.", ephemeral=True
+        )
+        return
+
+    # Guard the *other* copies of this card: once the issue is resolved or a
+    # re-grab is already in flight, clicking a stale copy must not fire the
+    # whole delete-and-grab again (that's how duplicate downloads happen).
+    if tracked.status == ISSUE_RESOLVED:
+        await interaction.response.edit_message(
+            content="✅ This issue has already been resolved.", view=None
+        )
+        return
+    if _regrab_in_flight(tracked):
+        await interaction.response.edit_message(
+            content=f"⏳ A re-grab for **{tracked.title}** is already in flight — "
+            "waiting for the replacement to download and import.",
+            view=None,
         )
         return
 
@@ -145,17 +229,31 @@ async def act_regrab(
         await _restore_card(interaction, issue_id, f"ℹ️ {result.message}")
         return
 
+    # Record the in-flight re-grab; the poller takes it from here and resolves
+    # the issue once the replacement imports (or flags it if the download dies).
     try:
-        await bot.seerr.update_issue_status(issue_id, resolved=True)
-        await bot.store.mark_issue(issue_id, status=ISSUE_RESOLVED)
-    except SeerrError as exc:
-        logger.debug("Re-grabbed but couldn't resolve issue %s: %s", issue_id, exc)
+        await bot.store.mark_issue(
+            issue_id,
+            regrab_state="grabbed",
+            regrab_release=result.release or "",
+            regrab_by=str(interaction.user.id),
+            regrab_at=datetime.now(timezone.utc).isoformat(),
+        )
+    except Exception:  # noqa: BLE001 - bookkeeping must not undo the grab
+        logger.debug("Could not record re-grab for issue %s", issue_id, exc_info=True)
 
-    note = f"🎯 {result.message} Re-grabbed & resolved by {interaction.user.mention}."
+    note = (
+        f"📥 {result.message} Started by {interaction.user.mention} — the issue stays "
+        "open until the replacement finishes downloading and imports."
+    )
     try:
         await interaction.edit_original_response(content=note, view=None)
     except discord.HTTPException:
         await interaction.followup.send(note, ephemeral=True)
+    await sync_issue_cards(
+        bot, issue_id, note,
+        skip_message_id=getattr(getattr(interaction, "message", None), "id", None),
+    )
 
 
 async def act_resolve(
@@ -167,6 +265,14 @@ async def act_resolve(
     if not await bot.is_issue_handler(interaction.user.id):
         await interaction.response.send_message(
             "⛔ You're not set up to handle issues.", ephemeral=True
+        )
+        return
+
+    tracked = await bot.store.get_tracked_issue(issue_id)
+    if tracked is not None and tracked.status == ISSUE_RESOLVED:
+        # A stale copy of the card (another admin already resolved it).
+        await interaction.response.edit_message(
+            content="✅ This issue has already been resolved.", view=None
         )
         return
 
@@ -192,6 +298,16 @@ async def act_resolve(
             await interaction.response.send_message(note, ephemeral=True)
         except discord.HTTPException:
             pass
+    # Kill the live buttons on every other copy of the card, then forget them —
+    # the issue is finalised, so there's nothing left to sync.
+    await sync_issue_cards(
+        bot, issue_id, note,
+        skip_message_id=getattr(getattr(interaction, "message", None), "id", None),
+    )
+    try:
+        await bot.store.delete_issue_messages(issue_id)
+    except Exception:  # noqa: BLE001
+        logger.debug("Could not clear card copies for issue %s", issue_id, exc_info=True)
 
 
 class RegrabButton(

@@ -112,6 +112,7 @@ class FakeBot:
             notify_on_issue_resolved=True,
             log_level="INFO",
             display_timezone="UTC",
+            allow_all_seasons=True,
         )
         self.applied = None
         self.plex = None
@@ -230,6 +231,17 @@ async def test_settings_toggle_updates_runtime(client):
     assert rt.require_linking is False  # unchecked => off
     assert rt.notify_on_declined is False
     assert rt.log_level == "DEBUG"
+    # "All seasons" unchecked => disabled, and persisted for restarts.
+    assert rt.allow_all_seasons is False
+    assert await _store.get_setting("allow_all_seasons") == "0"
+
+    await cli.post(
+        "/settings",
+        data={"allow_all_seasons": "on", "log_level": "DEBUG"},
+        allow_redirects=False,
+    )
+    assert rt.allow_all_seasons is True
+    assert await _store.get_setting("allow_all_seasons") == "1"
 
 
 @pytest.mark.asyncio
@@ -348,7 +360,7 @@ async def test_issue_research_action_invokes_arr(client, monkeypatch):
 
     async def fake_research(media_type, tmdb_id, *, season=None, episode=None):
         calls.append((media_type, tmdb_id, season, episode))
-        return ResearchResult(True, "Grabbed “Good Release”.")
+        return ResearchResult(True, "Grabbed “Good Release”.", release="Good Release")
 
     monkeypatch.setattr(_dash.bot.arr, "research", fake_research)
 
@@ -357,8 +369,19 @@ async def test_issue_research_action_invokes_arr(client, monkeypatch):
     )
     assert resp.status == 302 and resp.headers["Location"].startswith("/issues")
     assert calls == [("movie", 603, None, None)]
-    # A real grab resolves the issue.
-    assert _dash.bot.seerr.status_updates == [(5, True)]
+    # A grab does NOT resolve the issue — the poller resolves it on import.
+    assert _dash.bot.seerr.status_updates == []
+    tracked = await store.get_tracked_issue(5)
+    assert tracked.status == 1  # still ISSUE_OPEN
+    assert tracked.regrab_state == "grabbed"
+    assert tracked.regrab_release == "Good Release" and tracked.regrab_by == "dashboard"
+
+    # A second re-grab while the first is in flight is refused.
+    resp = await cli.post(
+        "/issues/research", data={"issue_id": "5"}, allow_redirects=False
+    )
+    assert resp.status == 302 and "flight" in resp.headers["Location"]
+    assert calls == [("movie", 603, None, None)]  # not fired again
 
 
 @pytest.mark.asyncio
