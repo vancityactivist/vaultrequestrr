@@ -74,7 +74,7 @@ async def test_research_media_movie_no_releases_keeps_file_and_does_not_grab():
     )
 
     assert res.grabbed is False
-    assert "No releases" in res.message
+    assert "No new releases" in res.message
     assert not any(m == "DELETE" for m, _ in calls)  # never delete what we can't replace
 
 
@@ -115,6 +115,110 @@ async def test_research_media_tv_monitors_and_grabs_episode():
     assert "S01E02" in res.message
     assert ("PUT", "/api/v3/episode/monitor") in calls
     assert ("DELETE", "/api/v3/episodefile/7") in calls
+
+
+@pytest.mark.asyncio
+async def test_research_media_excludes_and_blocklists_previous_grab():
+    """The release that produced the bad file must not be re-grabbed, and its
+    history record is marked failed (blocklisted) after the replacement grab."""
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        p = request.url.path
+        calls.append((request.method, p))
+        if request.method == "GET" and p == "/api/v3/movie/110":
+            return httpx.Response(200, json={"id": 110, "movieFile": {"id": 5}})
+        if p == "/api/v3/movie/editor":
+            return httpx.Response(202, json={})
+        if request.method == "GET" and p == "/api/v3/history/movie":
+            return httpx.Response(200, json=[
+                {"id": 77, "eventType": "grabbed", "sourceTitle": "Bad.Release",
+                 "date": "2026-07-01T00:00:00Z"},
+                {"id": 78, "eventType": "downloadFolderImported",
+                 "sourceTitle": "Bad.Release", "date": "2026-07-01T01:00:00Z"},
+            ])
+        if request.method == "GET" and p == "/api/v3/release":
+            return httpx.Response(200, json=[
+                # The bad release scores highest — but must be excluded.
+                {"guid": "a", "indexerId": 1, "title": "Bad.Release", "rejected": False,
+                 "qualityWeight": 99, "seeders": 99, "indexer": "X"},
+                {"guid": "b", "indexerId": 2, "title": "Other.Release", "rejected": False,
+                 "qualityWeight": 20, "seeders": 5, "indexer": "NZB"},
+            ])
+        if request.method == "POST" and p == "/api/v3/release":
+            assert json.loads(request.content) == {"guid": "b", "indexerId": 2}
+            return httpx.Response(201, json={})
+        if request.method == "POST" and p == "/api/v3/history/failed/77":
+            return httpx.Response(200, json={})
+        return httpx.Response(200, json={})
+
+    res = await research_media(
+        make_instance(), "movie", 110, transport=httpx.MockTransport(handler)
+    )
+
+    assert res.grabbed is True and res.release == "Other.Release"
+    assert ("POST", "/api/v3/history/failed/77") in calls
+    # Blocklisting happens only after the replacement grab is queued.
+    assert calls.index(("POST", "/api/v3/release")) < calls.index(
+        ("POST", "/api/v3/history/failed/77")
+    )
+
+
+@pytest.mark.asyncio
+async def test_research_media_gives_up_when_only_previous_release_available():
+    def handler(request: httpx.Request) -> httpx.Response:
+        p = request.url.path
+        if request.method == "GET" and p == "/api/v3/movie/110":
+            return httpx.Response(200, json={"id": 110, "movieFile": {"id": 5}})
+        if request.method == "GET" and p == "/api/v3/history/movie":
+            return httpx.Response(200, json=[
+                {"id": 77, "eventType": "grabbed", "sourceTitle": "Bad.Release"},
+            ])
+        if request.method == "GET" and p == "/api/v3/release":
+            return httpx.Response(200, json=[
+                {"guid": "a", "indexerId": 1, "title": "Bad.Release", "rejected": False},
+            ])
+        assert request.method != "DELETE"  # nothing grabbable -> keep the file
+        return httpx.Response(200, json={})
+
+    res = await research_media(
+        make_instance(), "movie", 110, transport=httpx.MockTransport(handler)
+    )
+    assert res.grabbed is False
+
+
+@pytest.mark.asyncio
+async def test_research_media_tv_skips_season_packs():
+    """A single-episode fix must never grab a whole-season pack, even if it scores best."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        p = request.url.path
+        if request.method == "GET" and p == "/api/v3/episode":
+            return httpx.Response(200, json=[
+                {"id": 900, "seasonNumber": 1, "episodeNumber": 2, "episodeFileId": 7}
+            ])
+        if request.method == "GET" and p == "/api/v3/history":
+            return httpx.Response(200, json={"records": [
+                {"id": 55, "eventType": "grabbed", "sourceTitle": "Old.Ep"},
+            ]})
+        if request.method == "GET" and p == "/api/v3/release":
+            return httpx.Response(200, json=[
+                {"guid": "pack", "indexerId": 1, "title": "Show.S01.Pack",
+                 "fullSeason": True, "rejected": False, "qualityWeight": 99, "seeders": 99},
+                {"guid": "ep", "indexerId": 2, "title": "Show.S01E02.New",
+                 "fullSeason": False, "rejected": False, "qualityWeight": 10, "seeders": 3,
+                 "indexer": "NZB"},
+            ])
+        if request.method == "POST" and p == "/api/v3/release":
+            assert json.loads(request.content) == {"guid": "ep", "indexerId": 2}
+            return httpx.Response(201, json={})
+        return httpx.Response(200, json={})
+
+    res = await research_media(
+        make_instance("sonarr"), "tv", 302, season=1, episode=2,
+        transport=httpx.MockTransport(handler),
+    )
+    assert res.grabbed is True and res.release == "Show.S01E02.New"
 
 
 @pytest.mark.asyncio

@@ -60,6 +60,13 @@ CREATE TABLE IF NOT EXISTS invites (
     created_at          TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS issue_messages (
+    issue_id    INTEGER NOT NULL,
+    channel_id  INTEGER NOT NULL,
+    message_id  INTEGER NOT NULL,
+    PRIMARY KEY (issue_id, message_id)
+);
+
 CREATE TABLE IF NOT EXISTS arr_instances (
     id          TEXT PRIMARY KEY,
     kind        TEXT NOT NULL,            -- 'radarr' | 'sonarr'
@@ -77,6 +84,11 @@ _MIGRATIONS = {
     "tracked_issues": {
         "problem_season": "INTEGER",
         "problem_episode": "INTEGER",
+        # Re-grab lifecycle: 'grabbed' (waiting for import), 'imported', 'failed'.
+        "regrab_state": "TEXT",
+        "regrab_release": "TEXT",
+        "regrab_by": "TEXT",
+        "regrab_at": "TEXT",
     },
     "account_links": {
         # Per-user Plex invite cap; NULL means "use the global default".
@@ -126,6 +138,18 @@ class TrackedIssue:
     notified_resolved: bool
     created_at: str
     updated_at: str | None
+    regrab_state: str | None = None
+    regrab_release: str | None = None
+    regrab_by: str | None = None
+    regrab_at: str | None = None
+
+
+@dataclass(frozen=True)
+class IssueMessage:
+    """One broadcast copy of an issue card (admin DM or channel post)."""
+    issue_id: int
+    channel_id: int
+    message_id: int
 
 
 @dataclass(frozen=True)
@@ -423,6 +447,10 @@ class LinkStore:
         *,
         status: int | None = None,
         notified_resolved: bool | None = None,
+        regrab_state: str | None = None,
+        regrab_release: str | None = None,
+        regrab_by: str | None = None,
+        regrab_at: str | None = None,
     ) -> None:
         sets = ["updated_at = ?"]
         params: list[object] = [datetime.now(timezone.utc).isoformat()]
@@ -432,9 +460,61 @@ class LinkStore:
         if notified_resolved is not None:
             sets.append("notified_resolved = ?")
             params.append(1 if notified_resolved else 0)
+        for column, value in (
+            ("regrab_state", regrab_state),
+            ("regrab_release", regrab_release),
+            ("regrab_by", regrab_by),
+            ("regrab_at", regrab_at),
+        ):
+            if value is not None:
+                sets.append(f"{column} = ?")
+                params.append(value)
         params.append(issue_id)
         await self._conn.execute(
             f"UPDATE tracked_issues SET {', '.join(sets)} WHERE issue_id = ?", params
+        )
+        await self._conn.commit()
+
+    async def issues_awaiting_import(self) -> list[TrackedIssue]:
+        """Issues whose re-grab was pushed to the download client but hasn't imported."""
+        async with self._conn.execute(
+            """
+            SELECT * FROM tracked_issues
+            WHERE regrab_state = 'grabbed' AND notified_resolved = 0
+            ORDER BY created_at ASC
+            """
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [_row_to_tracked_issue(row) for row in rows]
+
+    # -- issue card copies (for syncing outcomes across every admin's card) --
+
+    async def add_issue_message(
+        self, issue_id: int, channel_id: int, message_id: int
+    ) -> None:
+        await self._conn.execute(
+            """
+            INSERT INTO issue_messages (issue_id, channel_id, message_id)
+            VALUES (?, ?, ?)
+            ON CONFLICT(issue_id, message_id) DO NOTHING
+            """,
+            (issue_id, channel_id, message_id),
+        )
+        await self._conn.commit()
+
+    async def list_issue_messages(self, issue_id: int) -> list[IssueMessage]:
+        async with self._conn.execute(
+            "SELECT * FROM issue_messages WHERE issue_id = ?", (issue_id,)
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [
+            IssueMessage(row["issue_id"], row["channel_id"], row["message_id"])
+            for row in rows
+        ]
+
+    async def delete_issue_messages(self, issue_id: int) -> None:
+        await self._conn.execute(
+            "DELETE FROM issue_messages WHERE issue_id = ?", (issue_id,)
         )
         await self._conn.commit()
 
@@ -610,6 +690,10 @@ def _row_to_tracked_issue(row: aiosqlite.Row) -> TrackedIssue:
         notified_resolved=bool(row["notified_resolved"]),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        regrab_state=row["regrab_state"],
+        regrab_release=row["regrab_release"],
+        regrab_by=row["regrab_by"],
+        regrab_at=row["regrab_at"],
     )
 
 

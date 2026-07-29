@@ -5,14 +5,21 @@ connection details out of Seerr's own settings at call time (see
 ``SeerrClient.get_arr_config``).
 
 Re-searching a reported file (``research_media``) runs an *interactive* indexer
-search so the result is known synchronously, which lets the caller resolve the
-issue only when a release is actually grabbed:
+search so the result is known synchronously, which lets the caller act only
+when a release is actually grabbed:
 
 1. Make sure the item is **monitored** — Radarr/Sonarr won't grab for an
    unmonitored movie/episode, so an automatic search would silently do nothing.
-2. Interactive search for candidate releases. If there are none, stop and leave
-   the existing file in place (don't delete something we can't replace).
-3. Delete the current file and grab the best candidate, forcing a replacement.
+2. Look up the grab history so the release that produced the bad file can be
+   excluded — re-downloading the identical release would "fix" nothing.
+3. Interactive search for candidate releases (season packs are skipped for
+   single-episode fixes). If there are none, stop and leave the existing file
+   in place (don't delete something we can't replace).
+4. Delete the current file and grab the best candidate, forcing a replacement.
+5. Mark the old grab as failed so the arr blocklists that release. This happens
+   *after* our grab on purpose: mark-as-failed can trigger the arr's own
+   redownload search, and with our replacement already in the queue that search
+   rejects further candidates instead of double-grabbing.
 """
 from __future__ import annotations
 
@@ -37,6 +44,7 @@ class ResearchResult:
     """Outcome of a delete-and-re-search: whether a release was actually grabbed."""
     grabbed: bool
     message: str
+    release: str | None = None  # title of the grabbed release, when grabbed
 
 
 class ArrClient:
@@ -165,6 +173,31 @@ class ArrClient:
         """Push a specific release to the download client."""
         await self._request("POST", "release", json={"guid": guid, "indexerId": indexer_id})
 
+    # -- history / blocklist ----------------------------------------------
+
+    async def movie_history(self, movie_id: int) -> list[dict[str, Any]]:
+        """Radarr grab/import history for one movie."""
+        data = await self._request("GET", "history/movie", params={"movieId": movie_id})
+        return data if isinstance(data, list) else []
+
+    async def episode_history(self, episode_id: int) -> list[dict[str, Any]]:
+        """Sonarr history for one episode (paged endpoint; first page, newest first)."""
+        data = await self._request(
+            "GET", "history",
+            params={
+                "episodeId": episode_id, "pageSize": 100,
+                "sortKey": "date", "sortDirection": "descending",
+            },
+        )
+        if isinstance(data, dict):
+            records = data.get("records")
+            return records if isinstance(records, list) else []
+        return data if isinstance(data, list) else []
+
+    async def mark_history_failed(self, history_id: int) -> None:
+        """Mark a past grab as failed, adding its release to the arr's blocklist."""
+        await self._request("POST", f"history/failed/{history_id}")
+
 
 async def research_media(
     instance: "ArrInstance",
@@ -197,41 +230,101 @@ async def research_media(
             episode_id = ep["id"]
             file_id = ep.get("episodeFileId")
             await client.set_episode_monitored(episode_id, True)
-            best = _best_release(await client.releases(episode_id=episode_id))
+            prev_grab = _last_grab(await client.episode_history(episode_id))
+            best = _best_release(
+                await client.releases(episode_id=episode_id),
+                exclude_titles=_grab_titles(prev_grab),
+                episode_search=True,
+            )
             if best is None:
                 return ResearchResult(
                     False,
-                    f"No releases found for {label} — nothing was changed, so the issue stays open.",
+                    f"No new releases found for {label} (the release already on disk doesn't "
+                    "count) — nothing was changed, so the issue stays open.",
                 )
             if file_id:
                 await client.delete_episode_file(file_id)
             await client.grab(best["guid"], best["indexer_id"])
+            await _blocklist_grab(client, prev_grab)
             return ResearchResult(
-                True, f"Grabbed “{best['title']}” from {best['indexer'] or 'the indexer'} for {label}."
+                True,
+                f"Grabbed “{best['title']}” from {best['indexer'] or 'the indexer'} for {label}.",
+                release=best["title"],
             )
 
         movie = await client.movie(external_id)
         file_id = (movie.get("movieFile") or {}).get("id")
         await client.set_movie_monitored(external_id, True)
-        best = _best_release(await client.releases(movie_id=external_id))
+        prev_grab = _last_grab(await client.movie_history(external_id))
+        best = _best_release(
+            await client.releases(movie_id=external_id),
+            exclude_titles=_grab_titles(prev_grab),
+        )
         if best is None:
             return ResearchResult(
-                False, "No releases found — nothing was changed, so the issue stays open."
+                False,
+                "No new releases found (the release already on disk doesn't count) — "
+                "nothing was changed, so the issue stays open.",
             )
         if file_id:
             await client.delete_movie_file(file_id)
         await client.grab(best["guid"], best["indexer_id"])
+        await _blocklist_grab(client, prev_grab)
         return ResearchResult(
-            True, f"Grabbed “{best['title']}” from {best['indexer'] or 'the indexer'}."
+            True,
+            f"Grabbed “{best['title']}” from {best['indexer'] or 'the indexer'}.",
+            release=best["title"],
         )
     finally:
         await client.aclose()
 
 
-def _best_release(raw_releases: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """Pick the best grabbable release: prefer non-rejected, then by score/seeders."""
+def _last_grab(records: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The most recent 'grabbed' history record — i.e. the release now on disk."""
+    grabs = [r for r in records if r.get("eventType") == "grabbed"]
+    if not grabs:
+        return None
+    return max(grabs, key=lambda r: str(r.get("date") or ""))
+
+
+def _grab_titles(grab: dict[str, Any] | None) -> set[str]:
+    """Release title(s) of a history grab, for excluding it from a re-search."""
+    return {grab["sourceTitle"]} if grab and grab.get("sourceTitle") else set()
+
+
+async def _blocklist_grab(client: ArrClient, grab: dict[str, Any] | None) -> None:
+    """Best-effort: mark the old grab failed so the arr blocklists that release.
+
+    Called after the replacement is grabbed (see module docstring for why the
+    ordering matters). A failure here never fails the re-grab itself.
+    """
+    if grab is None or grab.get("id") is None:
+        return
+    try:
+        await client.mark_history_failed(grab["id"])
+    except ArrError as exc:
+        logger.debug("Could not blocklist previous grab %s: %s", grab.get("id"), exc)
+
+
+def _best_release(
+    raw_releases: list[dict[str, Any]],
+    *,
+    exclude_titles: set[str] | frozenset[str] = frozenset(),
+    episode_search: bool = False,
+) -> dict[str, Any] | None:
+    """Pick the best grabbable release: prefer non-rejected, then by score/seeders.
+
+    ``exclude_titles`` drops the release that produced the file being replaced
+    (re-grabbing the identical release fixes nothing). ``episode_search`` drops
+    season packs — grabbing a whole season to fix one episode re-downloads
+    everything and leaves same-quality duplicates unimported.
+    """
+    excluded = {t.lower() for t in exclude_titles if t}
     candidates = [
-        r for r in raw_releases if r.get("guid") and r.get("indexerId") is not None
+        r for r in raw_releases
+        if r.get("guid") and r.get("indexerId") is not None
+        and (r.get("title") or "").lower() not in excluded
+        and not (episode_search and r.get("fullSeason"))
     ]
     if not candidates:
         return None

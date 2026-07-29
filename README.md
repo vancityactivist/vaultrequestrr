@@ -40,6 +40,9 @@ visible in the Seerr UI.
 Search results and the season picker show availability at a glance (✅ available,
 🟡 partial, ⏳ processing, 🕒 requested), and the Request button greys out when
 the selected media/seasons are already present. Results beyond 25 paginate.
+The **“All seasons”** option in the season picker can be turned off on the
+dashboard (**Settings → General → Bot behaviour**) — useful on servers with
+strict season quotas, forcing users to pick individual seasons instead.
 
 ### Reporting issues
 
@@ -56,10 +59,16 @@ When an issue is filed, VaultRequestrr **DMs the configured issue handlers** (an
 to an optional **issue channel**) with a card carrying **Re-grab** and **Resolve**
 buttons — persistent, like the request buttons. **Re-grab** sets the title monitored,
 runs an interactive search and grabs a replacement (only deleting the existing file
-once a release is found), resolving the issue **only if a release is actually
-grabbed**; **Resolve** just marks it resolved. The same actions live on the dashboard
-**Issues** page. Re-grab is the fix for a bad/corrupt file: Radarr/Sonarr won't grab
-for an *unmonitored* item, so it ensures monitoring first.
+once a release is found). The release that produced the bad file is **excluded from
+the search and blocklisted** so the identical release can't come back, and season
+packs are skipped when fixing a single episode. The issue then stays open until the
+replacement **actually finishes downloading and imports** — VaultRequestrr watches the
+arr queue, resolves the issue (and DMs the reporter) on import, and reopens the card
+with a warning if the download dies. Outcomes are synced to **every** copy of the
+card (each handler's DM and the channel post), so a second admin can't accidentally
+fire a duplicate re-grab. **Resolve** just marks it resolved. The same actions live on
+the dashboard **Issues** page. Re-grab is the fix for a bad/corrupt file:
+Radarr/Sonarr won't grab for an *unmonitored* item, so it ensures monitoring first.
 
 Who gets issue notifications (and can act on them) and which channel they post to are
 set on the dashboard **Settings → Approvals & Issues → Issue notifications** card —

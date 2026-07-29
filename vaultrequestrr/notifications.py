@@ -12,6 +12,7 @@ import logging
 import discord
 from discord.ext import tasks
 
+from .arr import ArrError
 from .seerr import (
     ISSUE_RESOLVED,
     ISSUE_TYPE_LABELS,
@@ -31,6 +32,12 @@ logger = logging.getLogger(__name__)
 # poller relaxes to the (longer) configured POLL_INTERVAL_SECONDS as a backstop.
 ACTIVE_POLL_SECONDS = 120
 MIN_POLL_SECONDS = 30
+
+# Re-grab import watching: give the download client a moment to surface the
+# queue item before judging, and only call a re-grab dead once the queue has
+# been empty with no file for a while (covers post-download import lag).
+REGRAB_QUEUE_GRACE_SECONDS = 120
+REGRAB_FAIL_SECONDS = 15 * 60
 
 
 def _parse_tracked_seasons(seasons: str | None) -> list[int]:
@@ -163,15 +170,21 @@ class NotificationService:
             episode=episode,
             message=message,
         )
-        await self._broadcast(
+        sent = await self._broadcast(
             embeds,
             lambda: build_issue_view(issue_id),
             recipient_ids=await self.bot.issue_notify_ids(),
             channel_id=await self.bot.issues_channel_id(),
         )
+        await self._record_issue_messages(issue_id, sent)
 
-    async def _broadcast(self, embeds, make_view, *, recipient_ids, channel_id) -> None:  # type: ignore[no-untyped-def]
-        """DM each recipient and post to the channel; a fresh view per send."""
+    async def _broadcast(self, embeds, make_view, *, recipient_ids, channel_id) -> list:  # type: ignore[no-untyped-def]
+        """DM each recipient and post to the channel; a fresh view per send.
+
+        Returns the messages that were actually sent, so issue cards can be
+        tracked and later edited in sync (see ``issue_actions.sync_issue_cards``).
+        """
+        sent = []
         for user_id in recipient_ids:
             try:
                 user = await self.bot.fetch_user(user_id)
@@ -179,7 +192,7 @@ class NotificationService:
                 logger.warning("Could not resolve recipient %s: %s", user_id, exc)
                 continue
             try:
-                await user.send(embeds=embeds, view=make_view())
+                sent.append(await user.send(embeds=embeds, view=make_view()))
             except discord.Forbidden:
                 logger.info("Recipient %s has DMs disabled; skipping", user_id)
             except discord.HTTPException as exc:
@@ -190,9 +203,24 @@ class NotificationService:
                 channel = self.bot.get_channel(channel_id) or await self.bot.fetch_channel(
                     channel_id
                 )
-                await channel.send(embeds=embeds, view=make_view())
+                sent.append(await channel.send(embeds=embeds, view=make_view()))
             except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
                 logger.warning("Could not post to channel %s: %s", channel_id, exc)
+        return sent
+
+    async def _record_issue_messages(self, issue_id: int, messages: list) -> None:
+        """Remember each card copy so later outcomes can be synced onto it."""
+        for msg in messages:
+            channel_id = getattr(getattr(msg, "channel", None), "id", None)
+            message_id = getattr(msg, "id", None)
+            if not isinstance(channel_id, int) or not isinstance(message_id, int):
+                continue
+            try:
+                await self.bot.store.add_issue_message(issue_id, channel_id, message_id)
+            except Exception:  # noqa: BLE001 - tracking is best-effort
+                logger.debug(
+                    "Could not record card copy for issue %s", issue_id, exc_info=True
+                )
 
     # -- targeted checks (used by the Seerr webhook for instant delivery) ----
 
@@ -238,6 +266,11 @@ class NotificationService:
             await self._poll_issues()
         except Exception:  # noqa: BLE001
             logger.exception("Failed to poll tracked issues")
+
+        try:
+            await self._poll_regrabs()
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to poll in-flight re-grabs")
 
         try:
             await self._adapt_interval()
@@ -314,6 +347,109 @@ class NotificationService:
         await self.bot.store.mark_issue(
             tracked.issue_id, status=ISSUE_RESOLVED, notified_resolved=True
         )
+
+    # -- re-grab import watching -------------------------------------------
+
+    async def _poll_regrabs(self) -> None:
+        """Finalise in-flight re-grabs: resolve on import, flag dead downloads.
+
+        A Re-grab click only pushes a release to the download client. The issue
+        must stay open until the replacement actually lands, so each poll checks
+        the arr queue/file state for every issue whose re-grab hasn't imported.
+        """
+        for tracked in await self.bot.store.issues_awaiting_import():
+            try:
+                await self._check_regrab(tracked)
+            except Exception:  # noqa: BLE001 - one bad issue can't stall the rest
+                logger.exception("Error checking re-grab for issue %s", tracked.issue_id)
+
+    async def _check_regrab(self, tracked: TrackedIssue) -> None:
+        from .issue_actions import age_seconds
+
+        elapsed = age_seconds(tracked.regrab_at)
+        if elapsed < REGRAB_QUEUE_GRACE_SECONDS:
+            return  # the download client may not have picked the grab up yet
+
+        try:
+            detail = await self.bot.arr.media_detail(
+                tracked.media_type,
+                tracked.tmdb_id,
+                season=tracked.problem_season,
+                episode=tracked.problem_episode,
+            )
+        except (ArrError, SeerrError) as exc:
+            logger.debug(
+                "Could not check re-grab for issue %s: %s", tracked.issue_id, exc
+            )
+            return
+
+        if detail["queue"]:
+            return  # still downloading/importing — keep waiting
+        if detail["has_file"]:
+            await self._finish_regrab(tracked)
+        elif elapsed > REGRAB_FAIL_SECONDS:
+            await self._fail_regrab(tracked)
+        # else: brief window between queue removal and import — check next poll.
+
+    async def _finish_regrab(self, tracked: TrackedIssue) -> None:
+        """The replacement imported: resolve the issue and finalise every card."""
+        from .issue_actions import sync_issue_cards
+
+        try:
+            await self.bot.seerr.update_issue_status(tracked.issue_id, resolved=True)
+        except SeerrError as exc:
+            logger.debug(
+                "Imported but couldn't resolve issue %s in Seerr: %s",
+                tracked.issue_id, exc,
+            )
+        # Reuses the normal resolution path: DMs the reporter once and marks
+        # the tracked issue resolved + notified.
+        await self._apply_issue_status(tracked, ISSUE_RESOLVED)
+        await self.bot.store.mark_issue(tracked.issue_id, regrab_state="imported")
+
+        release = f" (“{tracked.regrab_release}”)" if tracked.regrab_release else ""
+        by = ""
+        if tracked.regrab_by:  # a Discord id, or "dashboard" for web-started re-grabs
+            by = (
+                f" — started by <@{tracked.regrab_by}>"
+                if tracked.regrab_by.isdigit()
+                else f" — started via the {tracked.regrab_by}"
+            )
+        note = (
+            f"🎯 Replacement{release} for **{tracked.title or 'the reported title'}** "
+            f"downloaded & imported{by}. Issue resolved."
+        )
+        await sync_issue_cards(self.bot, tracked.issue_id, note)
+        await self.bot.store.delete_issue_messages(tracked.issue_id)
+
+    async def _fail_regrab(self, tracked: TrackedIssue) -> None:
+        """The download vanished without importing: reopen the cards for a retry."""
+        from .issue_actions import build_issue_view, sync_issue_cards
+
+        await self.bot.store.mark_issue(tracked.issue_id, regrab_state="failed")
+
+        title = tracked.title or "the reported title"
+        note = (
+            f"⚠️ The re-grabbed release for **{title}** left the download queue "
+            "without importing — the download likely failed. The issue is still open."
+        )
+        await sync_issue_cards(self.bot, tracked.issue_id, note)
+
+        embed = discord.Embed(
+            title="⚠️ Re-grab failed",
+            description=(
+                f"{note}\nYou can retry the re-grab or resolve the issue manually."
+            ),
+            color=discord.Color.orange(),
+        )
+        embed.set_footer(text="VaultRequestrr")
+        sent = await self._broadcast(
+            [embed],
+            lambda: build_issue_view(tracked.issue_id),
+            recipient_ids=await self.bot.issue_notify_ids(),
+            channel_id=await self.bot.issues_channel_id(),
+        )
+        await self._record_issue_messages(tracked.issue_id, sent)
 
     async def _dm_issue_resolved(self, tracked: TrackedIssue) -> None:
         try:

@@ -18,6 +18,9 @@ class RuntimeSettings:
     notify_on_issue_resolved: bool
     log_level: str
     display_timezone: str = "UTC"
+    # Whether the TV season picker offers "All seasons" (persisted; servers with
+    # strict season quotas can force users to pick individual seasons).
+    allow_all_seasons: bool = True
 
     @classmethod
     def from_config(cls, config: Config) -> "RuntimeSettings":
