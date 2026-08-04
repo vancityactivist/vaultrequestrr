@@ -628,3 +628,168 @@ async def test_get_title_returns_name_or_title():
         assert await client.get_title("tv", 1396) == "Breaking Bad"
     finally:
         await client.aclose()
+
+
+# -- version detection & capabilities --------------------------------------
+
+
+def test_parse_version_variants():
+    from vaultrequestrr.seerr import _parse_version
+
+    assert _parse_version("3.4.0") == (3, 4, 0)
+    assert _parse_version("v3.4.1-develop") == (3, 4, 1)
+    assert _parse_version("2.7") == (2, 7, 0)
+    assert _parse_version("develop") is None
+    assert _parse_version("") is None
+    assert _parse_version(None) is None
+
+
+@pytest.mark.asyncio
+async def test_detect_version_sets_capability():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/status"
+        return httpx.Response(200, json={"version": "3.4.0"})
+
+    client = make_client(handler)
+    try:
+        assert client.supports_issue_attribution is False  # unknown until detected
+        assert await client.detect_version() == "3.4.0"
+        assert client.server_version == "3.4.0"
+        assert client.supports_issue_attribution is True
+        client.mark_issue_attribution_unsupported()
+        assert client.supports_issue_attribution is False
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_old_servers_do_not_support_attribution():
+    # Overseerr 1.x, Jellyseerr 2.x, Seerr pre-3.4 — all lack POST /issue userId.
+    for version in ("1.33.2", "2.7.3", "3.3.0"):
+        def handler(request: httpx.Request, v=version) -> httpx.Response:
+            return httpx.Response(200, json={"version": v})
+
+        client = make_client(handler)
+        try:
+            await client.detect_version()
+            assert client.supports_issue_attribution is False, version
+        finally:
+            await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_create_issue_attributes_user_when_supported():
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/status":
+            return httpx.Response(200, json={"version": "3.4.0"})
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(201, json={"id": 9, "createdBy": {"id": 7}})
+
+    client = make_client(handler)
+    try:
+        await client.detect_version()
+        await client.create_issue(42, ISSUE_VIDEO, "no subs", user_id=7)
+        assert captured["body"]["userId"] == 7
+        assert client.supports_issue_attribution is True  # verified OK
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_create_issue_disables_attribution_when_server_ignores_userid():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/status":
+            return httpx.Response(200, json={"version": "3.4.0"})
+        # Server claims 3.4 but files the issue under the API-key owner.
+        return httpx.Response(201, json={"id": 9, "createdBy": {"id": 1}})
+
+    client = make_client(handler)
+    try:
+        await client.detect_version()
+        await client.create_issue(42, ISSUE_VIDEO, "no subs", user_id=7)
+        assert client.supports_issue_attribution is False
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_create_issue_omits_userid_when_unsupported():
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(201, json={"id": 9})
+
+    client = make_client(handler)  # version never detected -> capability off
+    try:
+        await client.create_issue(42, ISSUE_VIDEO, "no subs", user_id=7)
+        assert "userId" not in captured["body"]
+    finally:
+        await client.aclose()
+
+
+# -- request listing & requester parsing -----------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_request_parses_requester_and_requested_seasons():
+    payload = {
+        "id": 55,
+        "status": 2,
+        "requestedBy": {"id": 7},
+        "seasons": [{"seasonNumber": 2}, {"seasonNumber": 1}],
+        "media": {"mediaType": "tv", "tmdbId": 1399, "status": 3},
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    client = make_client(handler)
+    try:
+        info = await client.get_request(55)
+    finally:
+        await client.aclose()
+
+    assert info.requested_by_id == 7
+    assert sorted(info.requested_seasons) == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_list_requests_params_and_statuses():
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["params"] = dict(request.url.params)
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "id": 1,
+                        "status": 2,
+                        "createdAt": "2026-08-01T00:00:00.000Z",
+                        "requestedBy": {"id": 7, "displayName": "Alice"},
+                        "media": {"mediaType": "movie", "tmdbId": 603, "status": 5},
+                    }
+                ]
+            },
+        )
+
+    client = make_client(handler)
+    try:
+        rows = await client.list_requests(filter="all", sort="added", take=50, skip=100)
+    finally:
+        await client.aclose()
+
+    assert captured["params"] == {
+        "take": "50",
+        "skip": "100",
+        "sort": "added",
+        "filter": "all",
+        "sortDirection": "desc",
+    }
+    assert rows[0].request_status == 2
+    assert rows[0].media_status == 5
+    assert rows[0].requested_by_id == 7

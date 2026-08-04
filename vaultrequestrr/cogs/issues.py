@@ -9,8 +9,10 @@ Flow:
 
 Issues can only be filed against media Seerr already tracks (it needs the
 internal mediaInfo.id), so search results are filtered to in-library titles.
-The Seerr API creates the issue under the API key's owner, so the real
-reporter is recorded in the message text and tracked locally.
+On Seerr 3.4+ the issue is attributed to the reporter's own Seerr account
+(via the `userId` field); on older servers it lands under the API key's
+owner, so the real reporter is recorded in the message text instead. Either
+way it's tracked locally against the reporter's Discord id.
 """
 from __future__ import annotations
 
@@ -98,14 +100,27 @@ class IssueCog(commands.Cog):
         """File the issue with Seerr. Assumes the interaction is deferred."""
         discord_id = str(interaction.user.id)
         where = f" (S{season:02d}E{episode:02d})" if season is not None else ""
-        message = (
-            f"Reported by {reporter} (Discord {discord_id}) via VaultRequestrr{where}:\n\n{detail}"
+
+        # Seerr 3.4+ can attribute the issue to the reporter's own account;
+        # older servers get the reporter recorded in the message text instead.
+        link = await self.bot.store.get(discord_id)
+        attribute_to = (
+            link.seerr_user_id
+            if link is not None and self.bot.seerr.supports_issue_attribution
+            else None
         )
+        if attribute_to is not None:
+            message = f"{detail}\n\n— via VaultRequestrr{where}"
+        else:
+            message = (
+                f"Reported by {reporter} (Discord {discord_id}) via VaultRequestrr{where}:\n\n{detail}"
+            )
         try:
             created = await self.bot.seerr.create_issue(
                 result.media_id,
                 issue_type,
                 message,
+                user_id=attribute_to,
                 problem_season=season,
                 problem_episode=episode,
             )

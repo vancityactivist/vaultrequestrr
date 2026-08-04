@@ -7,6 +7,7 @@ search, media details, user lookup, per-user notification settings
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Sequence
@@ -171,6 +172,9 @@ class RequestInfo:
     # is present, not necessarily the one that was requested — so callers that
     # care about a specific season must consult this map instead.
     season_status: dict[int, int | None] = field(default_factory=dict)
+    requested_by_id: int | None = None  # Seerr user id of the requester
+    # Season numbers this request asked for (empty for movies).
+    requested_seasons: list[int] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -205,7 +209,7 @@ class IssueInfo:
 
 @dataclass(frozen=True)
 class PendingRequest:
-    """A request awaiting admin approval (request.status == REQUEST_PENDING)."""
+    """A request listed via GET /request (historically pending-only, hence the name)."""
     id: int
     media_type: str | None
     tmdb_id: int | None
@@ -213,6 +217,8 @@ class PendingRequest:
     requested_by_name: str | None
     seasons: list[int]
     created_at: str | None
+    request_status: int | None = None  # REQUEST_* code
+    media_status: int | None = None  # STATUS_* code
 
 
 class SeerrClient:
@@ -225,6 +231,13 @@ class SeerrClient:
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/") + "/api/v1/"
+        # Server version, detected lazily via GET /status. None until detected
+        # (or when the version string is unparseable, e.g. a dev build).
+        self._version: tuple[int, int, int] | None = None
+        self._version_raw: str | None = None
+        # Set when the server demonstrably ignored `userId` on POST /issue
+        # (a fork or dev build whose version number lied about the capability).
+        self._issue_attribution_broken = False
         self._client = httpx.AsyncClient(
             base_url=self._base_url,
             headers={
@@ -270,6 +283,48 @@ class SeerrClient:
     async def test_connection(self) -> None:
         """Raise SeerrError if the URL/key are wrong."""
         await self._get("settings/main")
+        # Piggyback a version refresh: /status needs no auth, so this can't
+        # mask a bad key, and it keeps capability detection current.
+        await self.detect_version()
+
+    async def detect_version(self) -> str | None:
+        """Best-effort fetch of the server version string (cached).
+
+        Works on Overseerr, Jellyseerr and Seerr — GET /status has always
+        existed and requires no auth. Returns the raw version string, or None
+        when unreachable.
+        """
+        try:
+            data = await self._get("status") or {}
+        except SeerrError as exc:
+            logger.debug("Could not detect Seerr version: %s", exc)
+            return None
+        self._version_raw = data.get("version") or None
+        self._version = _parse_version(self._version_raw)
+        return self._version_raw
+
+    @property
+    def server_version(self) -> str | None:
+        """Raw version string from the last detect_version(), for display."""
+        return self._version_raw
+
+    @property
+    def supports_issue_attribution(self) -> bool:
+        """True when POST /issue accepts `userId` (Seerr >= 3.4.0).
+
+        Pre-3.4 servers silently ignore the field rather than erroring, so we
+        gate on the detected version and additionally allow runtime verification
+        (mark_issue_attribution_unsupported) to switch it off. Version-number
+        comparison is collision-safe: Jellyseerr topped out at 2.x and
+        Overseerr at 1.x, so only Seerr can report >= 3.4.0.
+        """
+        if self._issue_attribution_broken:
+            return False
+        return self._version is not None and self._version >= (3, 4, 0)
+
+    def mark_issue_attribution_unsupported(self) -> None:
+        """Record that the server ignored `userId` on POST /issue."""
+        self._issue_attribution_broken = True
 
     # -- search & details --------------------------------------------------
 
@@ -543,6 +598,12 @@ class SeerrClient:
             media_type=media.get("mediaType"),
             tmdb_id=media.get("tmdbId"),
             season_status=season_status,
+            requested_by_id=(data.get("requestedBy") or {}).get("id"),
+            requested_seasons=[
+                s.get("seasonNumber")
+                for s in (data.get("seasons") or [])
+                if s.get("seasonNumber") is not None
+            ],
         )
 
     async def approve_request(self, request_id: int) -> None:
@@ -555,9 +616,33 @@ class SeerrClient:
 
     async def list_pending_requests(self, *, take: int = 100) -> list[PendingRequest]:
         """All requests awaiting approval, oldest first."""
+        return await self.list_requests(filter="pending", sort="added", take=take)
+
+    async def list_requests(
+        self,
+        *,
+        filter: str = "all",
+        sort: str = "added",
+        take: int = 100,
+        skip: int = 0,
+    ) -> list[PendingRequest]:
+        """List requests across all users (the API key is an admin key).
+
+        Only filter values Overseerr/Jellyseerr already understood are safe here
+        (`all`, `pending`, `approved`, `available`, `processing`, `unavailable`) —
+        Seerr 3.x additions like `completed`/`deleted` would error on older
+        servers. `sortDirection` is sent for Seerr but harmlessly ignored by
+        older servers, whose `sort=added` order is already newest-first.
+        """
         data = await self._get(
             "request",
-            params={"take": take, "skip": 0, "sort": "added", "filter": "pending"},
+            params={
+                "take": take,
+                "skip": skip,
+                "sort": sort,
+                "filter": filter,
+                "sortDirection": "desc",
+            },
         )
         return [_to_pending_request(raw) for raw in data.get("results", [])]
 
@@ -579,26 +664,45 @@ class SeerrClient:
         issue_type: int,
         message: str,
         *,
+        user_id: int | None = None,
         problem_season: int | None = None,
         problem_episode: int | None = None,
     ) -> dict[str, Any]:
         """Report an issue against an in-library media item.
 
         `media_id` is the internal Seerr media DB id (mediaInfo.id), not a tmdbId.
-        The issue is attributed to the API key's owner; the reporter is recorded
-        in the message text by the caller. For TV, `problem_season`/`problem_episode`
-        pin the issue to a specific episode.
+        `user_id` attributes the issue to that Seerr user — supported by Seerr
+        3.4+ and only sent when `supports_issue_attribution` says so. Pre-3.4
+        servers silently ignore unknown body fields rather than erroring, so the
+        response's `createdBy` is verified and the capability disabled if the
+        server turns out to have ignored it (a fork or mislabelled build).
+        Without attribution the issue lands under the API key's owner and the
+        caller should record the reporter in the message text. For TV,
+        `problem_season`/`problem_episode` pin the issue to a specific episode.
         """
         body: dict[str, Any] = {
             "issueType": issue_type,
             "message": message,
             "mediaId": media_id,
         }
+        attributed = user_id is not None and self.supports_issue_attribution
+        if attributed:
+            body["userId"] = user_id
         if problem_season is not None:
             body["problemSeason"] = problem_season
         if problem_episode is not None:
             body["problemEpisode"] = problem_episode
-        return await self._post("issue", body)
+        created = await self._post("issue", body)
+        if attributed:
+            created_by = ((created or {}).get("createdBy") or {}).get("id")
+            if created_by is not None and created_by != user_id:
+                logger.warning(
+                    "Seerr ignored userId on POST /issue despite reporting version %s; "
+                    "disabling issue attribution",
+                    self._version_raw,
+                )
+                self.mark_issue_attribution_unsupported()
+        return created
 
     async def list_issues(self, *, take: int = 100) -> list[IssueInfo]:
         # `filter=all` is required — Seerr defaults to open issues only, which
@@ -635,6 +739,18 @@ class SeerrClient:
 
 
 # -- module-level parsing helpers -----------------------------------------
+
+_VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)(?:\.(\d+))?")
+
+
+def _parse_version(value: str | None) -> tuple[int, int, int] | None:
+    """Parse "3.4.0" / "v3.4.1-develop" style strings; None when unparseable."""
+    if not value:
+        return None
+    match = _VERSION_RE.match(value.strip())
+    if not match:
+        return None
+    return (int(match.group(1)), int(match.group(2)), int(match.group(3) or 0))
 
 
 def _to_search_result(raw: dict[str, Any]) -> SearchResult:
@@ -702,6 +818,8 @@ def _to_pending_request(raw: dict[str, Any]) -> PendingRequest:
         ),
         seasons=seasons,
         created_at=raw.get("createdAt"),
+        request_status=raw.get("status"),
+        media_status=media.get("status"),
     )
 
 

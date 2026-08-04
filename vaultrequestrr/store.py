@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS tracked_requests (
     notified_available  INTEGER NOT NULL DEFAULT 0,
     notified_declined   INTEGER NOT NULL DEFAULT 0,
     created_at          TEXT NOT NULL,
-    updated_at          TEXT
+    updated_at          TEXT,
+    source              TEXT NOT NULL DEFAULT 'bot'
 );
 
 CREATE TABLE IF NOT EXISTS app_settings (
@@ -94,6 +95,11 @@ _MIGRATIONS = {
         # Per-user Plex invite cap; NULL means "use the global default".
         "invite_limit": "INTEGER",
     },
+    "tracked_requests": {
+        # Where the request came from: 'bot' (submitted via Discord) or
+        # 'seerr' (made in the Seerr web UI and adopted by the notifier).
+        "source": "TEXT NOT NULL DEFAULT 'bot'",
+    },
 }
 
 
@@ -121,6 +127,7 @@ class TrackedRequest:
     notified_declined: bool
     created_at: str
     updated_at: str | None
+    source: str = "bot"  # 'bot' or 'seerr' (adopted web-UI request)
 
 
 @dataclass(frozen=True)
@@ -273,19 +280,31 @@ class LinkStore:
         tmdb_id: int | None,
         title: str | None,
         seasons: str | None,
+        *,
+        source: str = "bot",
+        notified_available: bool = False,
+        notified_declined: bool = False,
     ) -> None:
+        """Track a request for availability DMs.
+
+        The notified flags let the external-request backfill adopt requests
+        that are already in a terminal state without triggering a DM for them.
+        """
         now = datetime.now(timezone.utc).isoformat()
         await self._conn.execute(
             """
             INSERT INTO tracked_requests
-                (request_id, discord_id, media_type, tmdb_id, title, seasons, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (request_id, discord_id, media_type, tmdb_id, title, seasons,
+                 notified_available, notified_declined, created_at, updated_at, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(request_id) DO UPDATE SET
                 discord_id = excluded.discord_id,
                 title = excluded.title,
                 seasons = excluded.seasons
             """,
-            (request_id, discord_id, media_type, tmdb_id, title, seasons, now, now),
+            (request_id, discord_id, media_type, tmdb_id, title, seasons,
+             1 if notified_available else 0, 1 if notified_declined else 0,
+             now, now, source),
         )
         await self._conn.commit()
 
@@ -676,6 +695,7 @@ class LinkStore:
 
 
 def _row_to_tracked(row: aiosqlite.Row) -> TrackedRequest:
+    keys = row.keys()
     return TrackedRequest(
         request_id=row["request_id"],
         discord_id=row["discord_id"],
@@ -689,6 +709,7 @@ def _row_to_tracked(row: aiosqlite.Row) -> TrackedRequest:
         notified_declined=bool(row["notified_declined"]),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        source=(row["source"] if "source" in keys else None) or "bot",
     )
 
 

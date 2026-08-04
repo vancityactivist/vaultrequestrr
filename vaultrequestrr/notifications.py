@@ -1,9 +1,12 @@
 """Background poller that DMs requesters when their media lands or is declined.
 
-We only track requests submitted through the bot (recorded at submit time, which
-is also where we capture the title — the Seerr request payload doesn't include
-one). The poller checks each not-yet-finalised request and notifies on the first
-transition to available / declined, then stops tracking it.
+Requests submitted through the bot are recorded at submit time (which is also
+where we capture the title — the Seerr request payload doesn't include one).
+Requests made outside the bot (e.g. the Seerr web UI) are *adopted* into the
+same tracking table when their requester has linked their account: instantly
+via the Seerr webhook, or discovered by the poller's external sweep. The poller
+checks each not-yet-finalised request and notifies on the first transition to
+available / declined, then stops tracking it.
 """
 from __future__ import annotations
 
@@ -19,6 +22,7 @@ from .seerr import (
     REQUEST_DECLINED,
     STATUS_AVAILABLE,
     STATUS_PARTIALLY_AVAILABLE,
+    PendingRequest,
     RequestInfo,
     SeerrError,
     format_quota_line,
@@ -38,6 +42,12 @@ MIN_POLL_SECONDS = 30
 # been empty with no file for a while (covers post-download import lag).
 REGRAB_QUEUE_GRACE_SECONDS = 120
 REGRAB_FAIL_SECONDS = 15 * 60
+
+# External-request discovery: high-water mark (newest createdAt adopted so far)
+# persisted in app_settings, and page limits for each sweep of GET /request.
+EXTERNAL_CURSOR_KEY = "external_requests_cursor"
+EXTERNAL_PAGE_SIZE = 100
+EXTERNAL_MAX_PAGES = 5
 
 
 def _parse_tracked_seasons(seasons: str | None) -> list[int]:
@@ -227,13 +237,141 @@ class NotificationService:
     async def check_request(self, request_id: int) -> None:
         """Re-check a single tracked request now (webhook-triggered).
 
-        A no-op if we aren't tracking this request. Reuses the same finalisation
-        path as the poller, so it's idempotent against the notified_* flags.
+        Requests we aren't tracking yet — made in the Seerr web UI rather than
+        through the bot — get adopted first, when their requester has linked
+        their account. Reuses the same finalisation path as the poller, so it's
+        idempotent against the notified_* flags.
         """
         tracked = await self.bot.store.get_tracked(request_id)
         if tracked is None:
+            tracked = await self._adopt_request(request_id)
+        if tracked is None:
             return
         await self._check_one(tracked)
+
+    # -- external (web-UI) requests ----------------------------------------
+
+    async def _adopt_request(self, request_id: int) -> TrackedRequest | None:
+        """Start tracking a request that was made outside the bot.
+
+        Returns the new tracked row, or None when external tracking is off,
+        the request can't be fetched, or the requester never linked a Discord
+        account (there's nobody to DM).
+        """
+        if not self.bot.runtime.track_external_requests:
+            return None
+        try:
+            info = await self.bot.seerr.get_request(request_id)
+        except SeerrError as exc:
+            logger.debug("Could not fetch request %s for adoption: %s", request_id, exc)
+            return None
+        if info is None or info.requested_by_id is None or info.media_type not in ("movie", "tv"):
+            return None
+        link = await self.bot.store.get_by_seerr_user(info.requested_by_id)
+        if link is None:
+            return None
+        seasons = None
+        if info.media_type == "tv":
+            seasons = ",".join(str(n) for n in sorted(info.requested_seasons)) or "all"
+        title = None
+        if info.tmdb_id is not None:
+            title = await self.bot.seerr.get_title(info.media_type, info.tmdb_id)
+        await self.bot.store.add_tracked_request(
+            request_id,
+            link.discord_id,
+            info.media_type,
+            info.tmdb_id,
+            title,
+            seasons,
+            source="seerr",
+        )
+        logger.info(
+            "Adopted external request %s (%s) for Discord user %s",
+            request_id, title or info.tmdb_id, link.discord_id,
+        )
+        return await self.bot.store.get_tracked(request_id)
+
+    async def _sync_external_requests(self) -> None:
+        """Discover requests made outside the bot and adopt them for tracking.
+
+        Sweeps GET /request (newest first) down to the persisted cursor. The
+        very first sweep is a backfill: requests already available or declined
+        are adopted pre-notified, so enabling the feature records history
+        without blasting DMs for media that landed long ago.
+        """
+        if not self.bot.runtime.track_external_requests:
+            return
+        store = self.bot.store
+        cursor = await store.get_setting(EXTERNAL_CURSOR_KEY)
+        backfill = cursor is None
+        newest = cursor
+        caught_up = False
+        for page in range(EXTERNAL_MAX_PAGES):
+            try:
+                batch = await self.bot.seerr.list_requests(
+                    take=EXTERNAL_PAGE_SIZE, skip=page * EXTERNAL_PAGE_SIZE
+                )
+            except SeerrError as exc:
+                logger.debug("Could not list requests for external sync: %s", exc)
+                return
+            for req in batch:
+                created = req.created_at or ""
+                if newest is None or created > newest:
+                    newest = created
+                if cursor is not None and created <= cursor:
+                    caught_up = True
+                    break
+                try:
+                    await self._adopt_listed(req, backfill=backfill)
+                except Exception:  # noqa: BLE001 - one bad request can't stall the sweep
+                    logger.exception("Error adopting external request %s", req.id)
+            if caught_up or len(batch) < EXTERNAL_PAGE_SIZE:
+                break
+        if newest and newest != cursor:
+            await store.set_setting(EXTERNAL_CURSOR_KEY, newest)
+
+    async def _adopt_listed(self, req: PendingRequest, *, backfill: bool) -> None:
+        """Adopt one listed request, when its requester is linked and it's new."""
+        if req.id is None or req.requested_by_id is None:
+            return
+        if req.media_type not in ("movie", "tv"):
+            return
+        store = self.bot.store
+        if await store.get_tracked(req.id) is not None:
+            return  # bot-submitted, or already adopted (e.g. via the webhook)
+        link = await store.get_by_seerr_user(req.requested_by_id)
+        if link is None:
+            return
+        seasons = None
+        if req.media_type == "tv":
+            seasons = ",".join(str(n) for n in sorted(req.seasons)) or "all"
+        title = None
+        if req.tmdb_id is not None:
+            title = await self.bot.seerr.get_title(req.media_type, req.tmdb_id)
+        # Backfilled terminal states are adopted pre-notified. That includes
+        # PARTIALLY_AVAILABLE shows: the partial content may predate the
+        # request, and a wrong "now available" DM is worse than a missing one.
+        already_available = backfill and req.media_status in (
+            STATUS_AVAILABLE,
+            STATUS_PARTIALLY_AVAILABLE,
+        )
+        already_declined = backfill and req.request_status == REQUEST_DECLINED
+        await store.add_tracked_request(
+            req.id,
+            link.discord_id,
+            req.media_type,
+            req.tmdb_id,
+            title,
+            seasons,
+            source="seerr",
+            notified_available=already_available,
+            notified_declined=already_declined,
+        )
+        logger.info(
+            "Adopted external request %s (%s) for Discord user %s%s",
+            req.id, title or req.tmdb_id, link.discord_id,
+            " [backfill]" if backfill else "",
+        )
 
     async def check_issue(self, issue_id: int) -> None:
         """Re-check a single tracked issue now (webhook-triggered)."""
@@ -250,6 +388,13 @@ class NotificationService:
             await self._apply_issue_status(tracked, status)
 
     async def _poll(self) -> None:
+        # Discover web-UI requests first so a newly adopted one gets checked
+        # (and possibly DMed) in this same cycle.
+        try:
+            await self._sync_external_requests()
+        except Exception:  # noqa: BLE001 - never let the loop die
+            logger.exception("Failed to sync external requests")
+
         try:
             pending = await self.bot.store.pending_tracked()
         except Exception:  # noqa: BLE001 - never let the loop die
