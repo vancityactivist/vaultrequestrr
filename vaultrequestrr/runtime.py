@@ -21,6 +21,9 @@ class RuntimeSettings:
     # Whether the TV season picker offers "All seasons" (persisted; servers with
     # strict season quotas can force users to pick individual seasons).
     allow_all_seasons: bool = True
+    # Also DM for requests made in the Seerr web UI (persisted). Only linked
+    # users can be matched back to a Discord account.
+    track_external_requests: bool = True
 
     @classmethod
     def from_config(cls, config: Config) -> "RuntimeSettings":
@@ -30,4 +33,5 @@ class RuntimeSettings:
             notify_on_declined=config.notify_on_declined,
             notify_on_issue_resolved=config.notify_on_issue_resolved,
             log_level=config.log_level,
+            track_external_requests=config.track_external_requests,
         )

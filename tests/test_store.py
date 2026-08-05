@@ -312,3 +312,59 @@ async def test_remove_issue_cleans_card_records(store):
     await store.remove_issue(1)
     assert await store.get_tracked_issue(1) is None
     assert await store.list_issue_messages(1) == []
+
+
+@pytest.mark.asyncio
+async def test_tracked_request_source_and_prenotified(store):
+    await store.add_tracked_request(1, "42", "movie", 603, "The Matrix", None)
+    await store.add_tracked_request(
+        2, "42", "tv", 1399, "GoT", "1,2",
+        source="seerr", notified_available=True,
+    )
+    await store.add_tracked_request(
+        3, "42", "movie", 604, "Reloaded", None,
+        source="seerr", notified_declined=True,
+    )
+
+    assert (await store.get_tracked(1)).source == "bot"
+    web_row = await store.get_tracked(2)
+    assert web_row.source == "seerr" and web_row.notified_available
+
+    # Pre-notified adoptions never enter the pending poll set.
+    pending = await store.pending_tracked()
+    assert [t.request_id for t in pending] == [1]
+
+
+@pytest.mark.asyncio
+async def test_migration_adds_source_column_to_old_db(tmp_path):
+    import aiosqlite
+
+    path = str(tmp_path / "old.sqlite3")
+    # Simulate a DB created before the source column existed.
+    async with aiosqlite.connect(path) as db:
+        await db.execute(
+            """
+            CREATE TABLE tracked_requests (
+                request_id INTEGER PRIMARY KEY, discord_id TEXT NOT NULL,
+                media_type TEXT NOT NULL, tmdb_id INTEGER, title TEXT, seasons TEXT,
+                request_status INTEGER, media_status INTEGER,
+                notified_available INTEGER NOT NULL DEFAULT 0,
+                notified_declined INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL, updated_at TEXT
+            )
+            """
+        )
+        await db.execute(
+            "INSERT INTO tracked_requests (request_id, discord_id, media_type, created_at) "
+            "VALUES (9, '42', 'movie', 't')"
+        )
+        await db.commit()
+
+    s = LinkStore(path)
+    await s.connect()  # should ALTER in the source column without error
+    try:
+        assert (await s.get_tracked(9)).source == "bot"  # legacy rows read as bot
+        await s.add_tracked_request(10, "42", "movie", 603, "X", None, source="seerr")
+        assert (await s.get_tracked(10)).source == "seerr"
+    finally:
+        await s.close()

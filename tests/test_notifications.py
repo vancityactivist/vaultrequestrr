@@ -13,6 +13,7 @@ from vaultrequestrr.seerr import (
     STATUS_PARTIALLY_AVAILABLE,
     STATUS_PROCESSING,
     IssueInfo,
+    PendingRequest,
     QuotaStatus,
     RequestInfo,
     SeerrError,
@@ -45,16 +46,23 @@ class FakeUser:
 
 
 class FakeSeerr:
-    def __init__(self, info=None, exc=None, issues=None):
+    def __init__(self, info=None, exc=None, issues=None, listed=None):
         self.info = info
         self.exc = exc
         self.issues = issues or []
+        self.listed = listed or []  # PendingRequest rows for list_requests
         self.status_updates = []
 
     async def get_request(self, request_id):
         if self.exc:
             raise self.exc
         return self.info
+
+    async def list_requests(self, *, filter="all", sort="added", take=100, skip=0):
+        return self.listed[skip : skip + take]
+
+    async def get_title(self, media_type, tmdb_id):
+        return f"Title {tmdb_id}"
 
     async def list_issues(self, *, take=100):
         return self.issues
@@ -92,6 +100,7 @@ class FakeBot:
         notify_available=True,
         notify_declined=True,
         notify_issue_resolved=True,
+        track_external=True,
     ):
         self.store = store
         self.seerr = seerr
@@ -100,6 +109,7 @@ class FakeBot:
             notify_on_available=notify_available,
             notify_on_declined=notify_declined,
             notify_on_issue_resolved=notify_issue_resolved,
+            track_external_requests=track_external,
         )
         self.arr = FakeArr()
         self.sent = []
@@ -446,3 +456,144 @@ async def test_404_stops_tracking(store):
     async with store._conn.execute("SELECT COUNT(*) AS c FROM tracked_requests") as cur:
         row = await cur.fetchone()
     assert row["c"] == 0
+
+
+# -- external (web-UI) request adoption ------------------------------------
+
+
+def _listed_request(
+    req_id,
+    *,
+    created_at,
+    media_status=STATUS_PROCESSING,
+    request_status=REQUEST_PENDING,
+    requested_by=7,
+):
+    return PendingRequest(
+        id=req_id,
+        media_type="movie",
+        tmdb_id=600 + req_id,
+        requested_by_id=requested_by,
+        requested_by_name="Alice",
+        seasons=[],
+        created_at=created_at,
+        request_status=request_status,
+        media_status=media_status,
+    )
+
+
+@pytest.mark.asyncio
+async def test_webhook_adopts_external_request_and_dms(store):
+    await store.save("42", 7, "alice", "alice@example.com")
+    info = RequestInfo(
+        id=555, request_status=2, media_status=STATUS_AVAILABLE,
+        media_type="movie", tmdb_id=603, requested_by_id=7,
+    )
+    bot = FakeBot(store, FakeSeerr(info=info))
+    svc = NotificationService(bot)
+
+    await svc.check_request(555)  # webhook path: not tracked yet -> adopt
+
+    tracked = await store.get_tracked(555)
+    assert tracked is not None
+    assert tracked.source == "seerr"
+    assert tracked.discord_id == "42"
+    assert tracked.title == "Title 603"
+    assert tracked.notified_available
+    assert [uid for uid, _ in bot.sent] == [42]
+
+
+@pytest.mark.asyncio
+async def test_webhook_adoption_skips_unlinked_requester(store):
+    info = RequestInfo(
+        id=556, request_status=2, media_status=STATUS_AVAILABLE,
+        media_type="movie", tmdb_id=603, requested_by_id=99,  # never linked
+    )
+    bot = FakeBot(store, FakeSeerr(info=info))
+    svc = NotificationService(bot)
+
+    await svc.check_request(556)
+
+    assert await store.get_tracked(556) is None
+    assert bot.sent == []
+
+
+@pytest.mark.asyncio
+async def test_adoption_respects_toggle(store):
+    await store.save("42", 7, "alice", "alice@example.com")
+    info = RequestInfo(
+        id=557, request_status=2, media_status=STATUS_AVAILABLE,
+        media_type="movie", tmdb_id=603, requested_by_id=7,
+    )
+    bot = FakeBot(store, FakeSeerr(info=info), track_external=False)
+    svc = NotificationService(bot)
+
+    await svc.check_request(557)
+
+    assert await store.get_tracked(557) is None
+    assert bot.sent == []
+
+
+@pytest.mark.asyncio
+async def test_adopted_tv_request_records_seasons(store):
+    await store.save("42", 7, "alice", "alice@example.com")
+    info = RequestInfo(
+        id=558, request_status=REQUEST_PENDING, media_status=STATUS_PROCESSING,
+        media_type="tv", tmdb_id=1399, requested_by_id=7, requested_seasons=[2, 1],
+    )
+    bot = FakeBot(store, FakeSeerr(info=info))
+    svc = NotificationService(bot)
+
+    await svc.check_request(558)
+
+    tracked = await store.get_tracked(558)
+    assert tracked is not None and tracked.seasons == "1,2"
+    assert bot.sent == []  # still processing — DM comes when it lands
+
+
+@pytest.mark.asyncio
+async def test_first_sweep_backfills_without_dms(store):
+    await store.save("42", 7, "alice", "alice@example.com")
+    listed = [
+        _listed_request(1, created_at="2026-08-02T00:00:00.000Z", media_status=STATUS_AVAILABLE),
+        _listed_request(2, created_at="2026-08-01T00:00:00.000Z", request_status=REQUEST_DECLINED),
+        _listed_request(3, created_at="2026-07-31T00:00:00.000Z"),  # still processing
+        _listed_request(4, created_at="2026-07-30T00:00:00.000Z", requested_by=99),  # unlinked
+    ]
+    bot = FakeBot(store, FakeSeerr(listed=listed))
+    svc = NotificationService(bot)
+
+    await svc._sync_external_requests()
+
+    # Terminal-state requests adopted pre-notified: history without a DM blast.
+    assert (await store.get_tracked(1)).notified_available
+    assert (await store.get_tracked(2)).notified_declined
+    in_flight = await store.get_tracked(3)
+    assert not in_flight.notified_available and not in_flight.notified_declined
+    assert await store.get_tracked(4) is None  # unlinked requester skipped
+    from vaultrequestrr.notifications import EXTERNAL_CURSOR_KEY
+
+    assert await store.get_setting(EXTERNAL_CURSOR_KEY) == "2026-08-02T00:00:00.000Z"
+    assert bot.sent == []
+
+
+@pytest.mark.asyncio
+async def test_sweep_adopts_only_newer_than_cursor(store):
+    from vaultrequestrr.notifications import EXTERNAL_CURSOR_KEY
+
+    await store.save("42", 7, "alice", "alice@example.com")
+    await store.set_setting(EXTERNAL_CURSOR_KEY, "2026-08-01T00:00:00.000Z")
+    listed = [
+        _listed_request(5, created_at="2026-08-02T00:00:00.000Z", media_status=STATUS_AVAILABLE),
+        _listed_request(6, created_at="2026-07-30T00:00:00.000Z", media_status=STATUS_AVAILABLE),
+    ]
+    bot = FakeBot(store, FakeSeerr(listed=listed))
+    svc = NotificationService(bot)
+
+    await svc._sync_external_requests()
+
+    adopted = await store.get_tracked(5)
+    # Adopted live (not backfill): stays pending so the next check DMs it.
+    assert adopted is not None and not adopted.notified_available
+    assert await store.get_tracked(6) is None  # older than the cursor
+    assert await store.get_setting(EXTERNAL_CURSOR_KEY) == "2026-08-02T00:00:00.000Z"

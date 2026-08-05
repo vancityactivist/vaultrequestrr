@@ -197,6 +197,11 @@ class VaultRequestrr(commands.Bot):
         if allow_all is not None:
             self.runtime.allow_all_seasons = allow_all != "0"
 
+        # Restore the web-UI request tracking toggle.
+        track_external = await self.store.get_setting("track_external_requests")
+        if track_external is not None:
+            self.runtime.track_external_requests = track_external != "0"
+
         # Restore the Plex connection (web-UI configured, no env fallback).
         plex_token = await self.store.get_setting("plex_token")
         plex_machine_id = await self.store.get_setting("plex_machine_id")
