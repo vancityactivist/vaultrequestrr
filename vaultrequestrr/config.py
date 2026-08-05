@@ -34,6 +34,9 @@ class Config:
     notify_on_available: bool
     notify_on_declined: bool
     notify_on_issue_resolved: bool
+    # Also DM for requests made outside the bot (e.g. the Seerr web UI),
+    # for users who have linked their account. Overridable via the dashboard.
+    track_external_requests: bool
     # Web dashboard
     web_port: int
     web_password: str
@@ -87,6 +90,9 @@ class Config:
             notify_on_declined=_bool(os.getenv("NOTIFY_ON_DECLINED"), default=True),
             notify_on_issue_resolved=_bool(
                 os.getenv("NOTIFY_ON_ISSUE_RESOLVED"), default=True
+            ),
+            track_external_requests=_bool(
+                os.getenv("TRACK_EXTERNAL_REQUESTS"), default=True
             ),
             web_port=_optional_int(os.getenv("WEB_PORT")) or 5056,
             web_password=os.getenv("WEB_PASSWORD", "").strip(),

@@ -632,6 +632,20 @@ class WebDashboard:
         )
         key_placeholder = "•••••••• (unchanged — leave blank to keep)" if key_set else "Seerr API key"
 
+        version = self.bot.seerr.server_version
+        if version:
+            attribution = (
+                "issues are filed under the reporting user"
+                if self.bot.seerr.supports_issue_attribution
+                else "issue attribution needs Seerr 3.4+"
+            )
+            version_note = (
+                f'<p class="muted small">Server version: <strong>{html.escape(version)}</strong>'
+                f" — {attribution}.</p>"
+            )
+        else:
+            version_note = ""
+
         webhook_secret = await self._effective_webhook_secret()
         webhook_card = self._webhook_card(request, webhook_secret)
         admins_card = await self._admins_card()
@@ -652,6 +666,7 @@ class WebDashboard:
             </label>
             <button type="submit">Test &amp; save</button>
           </form>
+          {version_note}
           <p class="muted small">The connection is validated before saving, then applied
             immediately. Stored in the database and kept across restarts (environment
             variables are only the first-run default).</p>
@@ -665,6 +680,8 @@ class WebDashboard:
             <label class="check"><input type="checkbox" name="notify_on_available" {_checked(rt.notify_on_available)}> DM users when media becomes available</label>
             <label class="check"><input type="checkbox" name="notify_on_declined" {_checked(rt.notify_on_declined)}> DM users when a request is declined</label>
             <label class="check"><input type="checkbox" name="notify_on_issue_resolved" {_checked(rt.notify_on_issue_resolved)}> DM users when their reported issue is resolved</label>
+            <label class="check"><input type="checkbox" name="track_external_requests" {_checked(rt.track_external_requests)}> Also DM for requests made in the Seerr web UI<br>
+              <span class="muted small">Covers requests users make outside the bot. Only users who have linked their account (made at least one request through the bot) can be matched to a Discord account.</span></label>
             <label class="check"><input type="checkbox" name="allow_all_seasons" {_checked(rt.allow_all_seasons)}> Allow users to request “All seasons” of a show<br>
               <span class="muted small">Untick on servers with strict season quotas — users then have to pick individual seasons.</span></label>
             <label class="field">Log level
@@ -675,7 +692,7 @@ class WebDashboard:
             </label>
             <button type="submit">Save settings</button>
           </form>
-          <p class="muted small">These apply immediately but reset to env defaults on restart (the timezone and the “All seasons” toggle are persisted in the database).</p>
+          <p class="muted small">These apply immediately but reset to env defaults on restart (the timezone, the “All seasons” toggle and the web-UI request toggle are persisted in the database).</p>
         </div>"""
 
         # Grouped into tabs so the page reads as sections rather than one long
@@ -1618,6 +1635,10 @@ class WebDashboard:
         rt.allow_all_seasons = "allow_all_seasons" in data
         await self.bot.store.set_setting(
             "allow_all_seasons", "1" if rt.allow_all_seasons else "0"
+        )
+        rt.track_external_requests = "track_external_requests" in data
+        await self.bot.store.set_setting(
+            "track_external_requests", "1" if rt.track_external_requests else "0"
         )
         level = str(data.get("log_level", rt.log_level)).upper()
         if level in ("DEBUG", "INFO", "WARNING", "ERROR"):

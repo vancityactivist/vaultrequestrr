@@ -9,8 +9,10 @@ Flow:
 
 Issues can only be filed against media Seerr already tracks (it needs the
 internal mediaInfo.id), so search results are filtered to in-library titles.
-The Seerr API creates the issue under the API key's owner, so the real
-reporter is recorded in the message text and tracked locally.
+On Seerr 3.4+ the issue is attributed to the reporter's own Seerr account
+(via the `userId` field); on older servers it lands under the API key's
+owner, so the real reporter is recorded in the message text instead. Either
+way it's tracked locally against the reporter's Discord id.
 """
 from __future__ import annotations
 
@@ -98,22 +100,61 @@ class IssueCog(commands.Cog):
         """File the issue with Seerr. Assumes the interaction is deferred."""
         discord_id = str(interaction.user.id)
         where = f" (S{season:02d}E{episode:02d})" if season is not None else ""
-        message = (
+
+        # Seerr 3.4+ can attribute the issue to the reporter's own account;
+        # older servers get the reporter recorded in the message text instead.
+        link = await self.bot.store.get(discord_id)
+        attribute_to = (
+            link.seerr_user_id
+            if link is not None and self.bot.seerr.supports_issue_attribution
+            else None
+        )
+        unattributed_message = (
             f"Reported by {reporter} (Discord {discord_id}) via VaultRequestrr{where}:\n\n{detail}"
         )
+        if attribute_to is not None:
+            message = f"{detail}\n\n— via VaultRequestrr{where}"
+        else:
+            message = unattributed_message
         try:
             created = await self.bot.seerr.create_issue(
                 result.media_id,
                 issue_type,
                 message,
+                user_id=attribute_to,
                 problem_season=season,
                 problem_episode=episode,
             )
         except SeerrError as exc:
-            await interaction.followup.send(
-                f"⚠️ Couldn't submit the issue: {exc}", ephemeral=True
+            # Seerr 3.4+ validates userId: 404 when the linked account was
+            # deleted, 403 when the API key lacks MANAGE_ISSUES. Fall back to
+            # filing under the API key's owner so a stale link can't break
+            # issue reporting.
+            if attribute_to is None or exc.status not in (403, 404):
+                await interaction.followup.send(
+                    f"⚠️ Couldn't submit the issue: {exc}", ephemeral=True
+                )
+                return
+            if exc.status == 403:
+                # A permission problem applies to every user — stop trying.
+                self.bot.seerr.mark_issue_attribution_unsupported()
+            logger.warning(
+                "Issue attribution failed for Seerr user %s (%s); refiling unattributed",
+                attribute_to, exc,
             )
-            return
+            try:
+                created = await self.bot.seerr.create_issue(
+                    result.media_id,
+                    issue_type,
+                    unattributed_message,
+                    problem_season=season,
+                    problem_episode=episode,
+                )
+            except SeerrError as exc2:
+                await interaction.followup.send(
+                    f"⚠️ Couldn't submit the issue: {exc2}", ephemeral=True
+                )
+                return
 
         issue_id = (created or {}).get("id")
         if issue_id is not None:

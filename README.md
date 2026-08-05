@@ -51,9 +51,11 @@ Other) with media **already on the server**. The bot searches movies and TV,
 limits results to in-library titles, applies the same link gate as requests, then
 collects a short description and files it to Seerr's issue tracker. For TV the
 form also asks which **season and episode** is affected, so issues are pinned to
-a single episode. Because Seerr's API attributes every API-key issue to the admin
-account, the real reporter is recorded in the issue message and tracked locally so
-the dashboard and resolution DMs know who filed it.
+a single episode. On **Seerr 3.4+** the issue is filed under the reporter's own
+Seerr account (linked users). On older servers — where the API attributes every
+API-key issue to the admin account — the real reporter is recorded in the issue
+message instead. Either way it's tracked locally so the dashboard and resolution
+DMs know who filed it.
 
 When an issue is filed, VaultRequestrr **DMs the configured issue handlers** (and posts
 to an optional **issue channel**) with a card carrying **Re-grab** and **Resolve**
@@ -125,8 +127,17 @@ fix it by adding the TMDB "anime" keyword or correcting the series type in Sonar
 ### Notifications
 
 The bot **DMs the requester** when their request becomes available or is declined,
-and **DMs the reporter** when their issue is marked resolved. Only requests and
-issues made through the bot are tracked.
+and **DMs the reporter** when their issue is marked resolved.
+
+Requests made **outside the bot** — straight in the Seerr web UI — are covered
+too: the bot matches the Seerr requester back to their linked Discord account
+and DMs them the same availability/decline notifications. This only works for
+users who have linked (i.e. made at least one request through the bot); unlinked
+users' web requests are silently skipped. Adopted web requests also show up in
+`/myrequests` and the dashboard Activity page. Toggle the behaviour with
+`TRACK_EXTERNAL_REQUESTS` or on the dashboard (**Settings → General → Bot
+behaviour**); it's on by default. When first enabled, requests that are already
+available or declined are recorded without sending catch-up DMs.
 
 Delivery is driven by a **Seerr webhook** for near-instant DMs. Set a webhook secret
 — either the `WEBHOOK_SECRET` env var or, more conveniently, the **Seerr webhook** card
@@ -280,6 +291,7 @@ is the optional admin dashboard (`5056`), which is served only when you set a
 | `NOTIFY_ON_AVAILABLE` | no | `true` | DM requester when media becomes available |
 | `NOTIFY_ON_DECLINED` | no | `true` | DM requester when a request is declined |
 | `NOTIFY_ON_ISSUE_RESOLVED` | no | `true` | DM reporter when their issue is resolved |
+| `TRACK_EXTERNAL_REQUESTS` | no | `true` | Also DM for requests made in the Seerr web UI (linked users only) |
 | `WEB_PASSWORD` | no | — | Set to enable the admin dashboard |
 | `WEB_PORT` | no | `5056` | Port the dashboard listens on |
 | `WEBHOOK_SECRET` | no | — | Shared secret for the inbound Seerr webhook (blank = endpoint disabled) |

@@ -15,6 +15,8 @@ class FakeSeerr:
         self.approved = []
         self.declined = []
         self.pending = []
+        self.server_version = None
+        self.supports_issue_attribution = False
 
     async def test_connection(self):
         return None
@@ -113,6 +115,7 @@ class FakeBot:
             log_level="INFO",
             display_timezone="UTC",
             allow_all_seasons=True,
+            track_external_requests=True,
         )
         self.applied = None
         self.plex = None
@@ -238,13 +241,19 @@ async def test_settings_toggle_updates_runtime(client):
     assert rt.allow_all_seasons is False
     assert await _store.get_setting("allow_all_seasons") == "0"
 
+    # Web-UI request tracking unchecked => disabled, and persisted for restarts.
+    assert rt.track_external_requests is False
+    assert await _store.get_setting("track_external_requests") == "0"
+
     await cli.post(
         "/settings",
-        data={"allow_all_seasons": "on", "log_level": "DEBUG"},
+        data={"allow_all_seasons": "on", "track_external_requests": "on", "log_level": "DEBUG"},
         allow_redirects=False,
     )
     assert rt.allow_all_seasons is True
     assert await _store.get_setting("allow_all_seasons") == "1"
+    assert rt.track_external_requests is True
+    assert await _store.get_setting("track_external_requests") == "1"
 
 
 @pytest.mark.asyncio
