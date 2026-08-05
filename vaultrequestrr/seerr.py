@@ -48,7 +48,14 @@ MediaType = str  # "movie" or "tv"
 
 
 class SeerrError(RuntimeError):
-    """Raised when the Seerr API returns an error response."""
+    """Raised when the Seerr API returns an error response.
+
+    `status` is the HTTP status code, or None for transport-level failures.
+    """
+
+    def __init__(self, message: str, *, status: int | None = None) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 @dataclass(frozen=True)
@@ -270,7 +277,7 @@ class SeerrClient:
                 return response.json()
             return None
 
-        raise SeerrError(_error_message(response))
+        raise SeerrError(_error_message(response), status=response.status_code)
 
     async def _get(self, path: str, **kwargs: Any) -> Any:
         return await self._request("GET", path, **kwargs)
@@ -672,7 +679,9 @@ class SeerrClient:
 
         `media_id` is the internal Seerr media DB id (mediaInfo.id), not a tmdbId.
         `user_id` attributes the issue to that Seerr user — supported by Seerr
-        3.4+ and only sent when `supports_issue_attribution` says so. Pre-3.4
+        3.4+ and only sent when `supports_issue_attribution` says so. Seerr
+        validates it (404 for an unknown user, 403 without MANAGE_ISSUES), so
+        callers should retry without attribution on those statuses. Pre-3.4
         servers silently ignore unknown body fields rather than erroring, so the
         response's `createdBy` is verified and the capability disabled if the
         server turns out to have ignored it (a fork or mislabelled build).

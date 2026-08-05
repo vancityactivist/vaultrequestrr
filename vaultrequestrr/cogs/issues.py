@@ -109,12 +109,13 @@ class IssueCog(commands.Cog):
             if link is not None and self.bot.seerr.supports_issue_attribution
             else None
         )
+        unattributed_message = (
+            f"Reported by {reporter} (Discord {discord_id}) via VaultRequestrr{where}:\n\n{detail}"
+        )
         if attribute_to is not None:
             message = f"{detail}\n\n— via VaultRequestrr{where}"
         else:
-            message = (
-                f"Reported by {reporter} (Discord {discord_id}) via VaultRequestrr{where}:\n\n{detail}"
-            )
+            message = unattributed_message
         try:
             created = await self.bot.seerr.create_issue(
                 result.media_id,
@@ -125,10 +126,35 @@ class IssueCog(commands.Cog):
                 problem_episode=episode,
             )
         except SeerrError as exc:
-            await interaction.followup.send(
-                f"⚠️ Couldn't submit the issue: {exc}", ephemeral=True
+            # Seerr 3.4+ validates userId: 404 when the linked account was
+            # deleted, 403 when the API key lacks MANAGE_ISSUES. Fall back to
+            # filing under the API key's owner so a stale link can't break
+            # issue reporting.
+            if attribute_to is None or exc.status not in (403, 404):
+                await interaction.followup.send(
+                    f"⚠️ Couldn't submit the issue: {exc}", ephemeral=True
+                )
+                return
+            if exc.status == 403:
+                # A permission problem applies to every user — stop trying.
+                self.bot.seerr.mark_issue_attribution_unsupported()
+            logger.warning(
+                "Issue attribution failed for Seerr user %s (%s); refiling unattributed",
+                attribute_to, exc,
             )
-            return
+            try:
+                created = await self.bot.seerr.create_issue(
+                    result.media_id,
+                    issue_type,
+                    unattributed_message,
+                    problem_season=season,
+                    problem_episode=episode,
+                )
+            except SeerrError as exc2:
+                await interaction.followup.send(
+                    f"⚠️ Couldn't submit the issue: {exc2}", ephemeral=True
+                )
+                return
 
         issue_id = (created or {}).get("id")
         if issue_id is not None:
